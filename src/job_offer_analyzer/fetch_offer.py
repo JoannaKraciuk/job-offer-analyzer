@@ -9,6 +9,10 @@ from bs4 import BeautifulSoup
 import requests
 
 from job_offer_analyzer.models import OfferDraft, UNKNOWN_VALUE
+from job_offer_analyzer.salary_parser import (
+    extract_salary_info,
+    extract_salary_info_from_structured_data,
+)
 
 
 REQUEST_TIMEOUT_SECONDS = 20
@@ -120,6 +124,9 @@ def fetch_offer_from_url(url: str) -> OfferDraft:
     work_mode = _work_mode_from_job_posting(job_posting) or _infer_from_keywords(
         source_text, WORK_MODE_KEYWORDS
     )
+    salary = extract_salary_info_from_structured_data(job_posting, source_text)
+    if salary.amount_min is None:
+        salary = extract_salary_info(source_text)
 
     return OfferDraft(
         company=_trim(company, 120),
@@ -128,7 +135,8 @@ def fetch_offer_from_url(url: str) -> OfferDraft:
         location=_trim(location, 180) or UNKNOWN_VALUE,
         work_mode=work_mode or UNKNOWN_VALUE,
         contract_type=_infer_contract_type(source_text),
-        rate_expectations=_infer_rate(source_text),
+        rate_expectations=salary.display_value,
+        salary=salary,
         seniority=_infer_from_keywords(source_text, SENIORITY_KEYWORDS) or UNKNOWN_VALUE,
         must_have_summary=_section_summary(source_text, MUST_HAVE_HEADINGS),
         nice_to_have_summary=_section_summary(source_text, NICE_TO_HAVE_HEADINGS),

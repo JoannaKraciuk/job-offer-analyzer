@@ -11,9 +11,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from job_offer_analyzer.excel_writer import (
     append_offer_to_workbook,
     refresh_offer_availability_in_workbook,
+    refresh_offer_salaries_in_workbook,
 )
 from job_offer_analyzer.fetch_offer import OfferFetchError, fetch_offer_from_url
-from job_offer_analyzer.models import OfferDraft, UNKNOWN_VALUE
+from job_offer_analyzer.models import OfferDraft, SalaryInfo, UNKNOWN_VALUE
 from job_offer_analyzer.models import OfferRecord
 
 
@@ -31,6 +32,19 @@ FIELD_DEFAULTS = {
     "work_mode": UNKNOWN_VALUE,
     "seniority": UNKNOWN_VALUE,
     "contract_type": UNKNOWN_VALUE,
+    "salary_original_text": UNKNOWN_VALUE,
+    "salary_currency": UNKNOWN_VALUE,
+    "salary_amount_min": "",
+    "salary_amount_max": "",
+    "salary_period": UNKNOWN_VALUE,
+    "salary_tax_type": UNKNOWN_VALUE,
+    "salary_exchange_rate_to_pln": "",
+    "salary_exchange_rate_date": "",
+    "salary_pln_min_monthly": "",
+    "salary_pln_max_monthly": "",
+    "salary_pln_min_hourly": "",
+    "salary_pln_max_hourly": "",
+    "salary_conversion_assumptions": "",
     "must_have_summary": UNKNOWN_VALUE,
     "nice_to_have_summary": UNKNOWN_VALUE,
     "risks_notes": UNKNOWN_VALUE,
@@ -44,6 +58,9 @@ STATUS_OPTIONS = ["Nowa", "Do analizy", "Do poprawy CV", "Aplikować", "Odrzucon
 PRIORITY_OPTIONS = [UNKNOWN_VALUE, "Wysoki", "Średni", "Niski"]
 WORK_MODE_OPTIONS = [UNKNOWN_VALUE, "Remote", "Hybrid", "Office"]
 SENIORITY_OPTIONS = [UNKNOWN_VALUE, "Intern", "Junior", "Mid", "Senior", "Experienced"]
+SALARY_CURRENCY_OPTIONS = [UNKNOWN_VALUE, "PLN", "EUR", "USD"]
+SALARY_PERIOD_OPTIONS = [UNKNOWN_VALUE, "godzinowo", "miesięcznie", "rocznie"]
+SALARY_TAX_OPTIONS = [UNKNOWN_VALUE, "netto", "brutto"]
 
 
 def main() -> None:
@@ -57,7 +74,7 @@ def main() -> None:
 
     _ensure_session_defaults()
 
-    link_col, fetch_col, refresh_col = st.columns([4, 1, 1.4])
+    link_col, fetch_col, refresh_col, salary_refresh_col = st.columns([4, 1, 1.4, 1.4])
     with link_col:
         st.text_input("Link do oferty", key="link")
     with fetch_col:
@@ -66,12 +83,18 @@ def main() -> None:
     with refresh_col:
         st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
         refresh_clicked = st.button("Sprawdź oferty", use_container_width=True)
+    with salary_refresh_col:
+        st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+        salary_refresh_clicked = st.button("Uzupełnij stawki", use_container_width=True)
 
     if fetch_clicked:
         _fetch_link_into_form()
 
     if refresh_clicked:
         _refresh_offer_availability()
+
+    if salary_refresh_clicked:
+        _refresh_offer_salaries()
 
     if st.session_state["fetch_message"]:
         st.success(st.session_state["fetch_message"])
@@ -124,6 +147,58 @@ def main() -> None:
             )
 
         contract_type = st.text_input("Forma umowy", key="contract_type")
+
+        with st.expander("Wynagrodzenie", expanded=True):
+            st.text_area(
+                "Stawka źródłowa",
+                height=70,
+                key="salary_original_text",
+            )
+            salary_col_1, salary_col_2, salary_col_3, salary_col_4 = st.columns(4)
+            with salary_col_1:
+                st.selectbox(
+                    "Waluta",
+                    SALARY_CURRENCY_OPTIONS,
+                    key="salary_currency",
+                )
+            with salary_col_2:
+                st.text_input("Stawka min", key="salary_amount_min")
+            with salary_col_3:
+                st.text_input("Stawka max", key="salary_amount_max")
+            with salary_col_4:
+                st.selectbox(
+                    "Okres stawki",
+                    SALARY_PERIOD_OPTIONS,
+                    key="salary_period",
+                )
+
+            salary_col_5, salary_col_6, salary_col_7 = st.columns(3)
+            with salary_col_5:
+                st.selectbox(
+                    "Brutto/netto",
+                    SALARY_TAX_OPTIONS,
+                    key="salary_tax_type",
+                )
+            with salary_col_6:
+                st.text_input("Kurs waluty", key="salary_exchange_rate_to_pln")
+            with salary_col_7:
+                st.text_input("Data kursu", key="salary_exchange_rate_date")
+
+            salary_col_8, salary_col_9, salary_col_10, salary_col_11 = st.columns(4)
+            with salary_col_8:
+                st.text_input("PLN min miesięcznie", key="salary_pln_min_monthly")
+            with salary_col_9:
+                st.text_input("PLN max miesięcznie", key="salary_pln_max_monthly")
+            with salary_col_10:
+                st.text_input("PLN min godzinowo", key="salary_pln_min_hourly")
+            with salary_col_11:
+                st.text_input("PLN max godzinowo", key="salary_pln_max_hourly")
+
+            st.text_input(
+                "Założenia przeliczenia",
+                key="salary_conversion_assumptions",
+            )
+
         must_have_summary = st.text_area(
             "Must-have skrót", height=90, key="must_have_summary"
         )
@@ -159,6 +234,7 @@ def main() -> None:
         location=location.strip() or UNKNOWN_VALUE,
         contract_type=contract_type.strip() or UNKNOWN_VALUE,
         rate_expectations=rate_expectations.strip() or UNKNOWN_VALUE,
+        salary=_salary_from_session(),
         seniority=seniority,
         must_have_summary=must_have_summary.strip() or UNKNOWN_VALUE,
         nice_to_have_summary=nice_to_have_summary.strip() or UNKNOWN_VALUE,
@@ -187,6 +263,9 @@ def _ensure_session_defaults() -> None:
     _ensure_allowed_value("priority", PRIORITY_OPTIONS)
     _ensure_allowed_value("work_mode", WORK_MODE_OPTIONS)
     _ensure_allowed_value("seniority", SENIORITY_OPTIONS)
+    _ensure_allowed_value("salary_currency", SALARY_CURRENCY_OPTIONS)
+    _ensure_allowed_value("salary_period", SALARY_PERIOD_OPTIONS)
+    _ensure_allowed_value("salary_tax_type", SALARY_TAX_OPTIONS)
 
 
 def _ensure_allowed_value(key: str, allowed_values: list[str]) -> None:
@@ -249,6 +328,42 @@ def _refresh_offer_availability() -> None:
         )
 
 
+def _refresh_offer_salaries() -> None:
+    try:
+        with st.spinner("Uzupełniam stawki ofert..."):
+            summary = refresh_offer_salaries_in_workbook(WORKBOOK_PATH)
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Nie udało się uzupełnić stawek ofert: {exc}")
+        return
+
+    st.success(
+        "Sprawdzono "
+        f"{summary.checked_count} ofert. "
+        f"Uzupełniono stawki dla {summary.updated_count}, "
+        f"nie znaleziono stawek dla {summary.missing_count}, "
+        f"błędów pobrania: {summary.failed_count}."
+    )
+
+    if summary.results:
+        st.dataframe(
+            [
+                {
+                    "ID": result.offer_id,
+                    "Firma": result.company,
+                    "Stanowisko": result.title,
+                    "Stawka": result.salary_display,
+                    "Aktualizacja": "Tak" if result.updated else "Nie",
+                    "Notatka": result.note,
+                }
+                for result in summary.results
+            ],
+            use_container_width=True,
+        )
+
+
 def _apply_draft(draft: OfferDraft) -> None:
     _set_if_useful("company", draft.company)
     _set_if_useful("title", draft.title)
@@ -257,6 +372,7 @@ def _apply_draft(draft: OfferDraft) -> None:
     _set_if_useful("contract_type", draft.contract_type)
     _set_if_useful("rate_expectations", draft.rate_expectations)
     _set_if_useful("seniority", draft.seniority, allowed_values=SENIORITY_OPTIONS)
+    _apply_salary(draft.salary)
     _set_if_useful("must_have_summary", draft.must_have_summary)
     _set_if_useful("nice_to_have_summary", draft.nice_to_have_summary)
     _set_if_useful("risks_notes", draft.risks_notes)
@@ -265,6 +381,77 @@ def _apply_draft(draft: OfferDraft) -> None:
     st.session_state["status"] = "Do analizy"
     st.session_state["next_step"] = "Porównać ofertę z CV i przygotować aplikację"
     st.session_state["source_preview"] = draft.source_text
+
+
+def _apply_salary(salary: SalaryInfo) -> None:
+    _set_if_useful("salary_original_text", salary.original_text)
+    _set_if_useful(
+        "salary_currency",
+        salary.currency,
+        allowed_values=SALARY_CURRENCY_OPTIONS,
+    )
+    _set_if_useful(
+        "salary_period",
+        salary.period,
+        allowed_values=SALARY_PERIOD_OPTIONS,
+    )
+    _set_if_useful(
+        "salary_tax_type",
+        salary.tax_type,
+        allowed_values=SALARY_TAX_OPTIONS,
+    )
+    _set_text_value("salary_amount_min", salary.amount_min)
+    _set_text_value("salary_amount_max", salary.amount_max)
+    _set_text_value("salary_exchange_rate_to_pln", salary.exchange_rate_to_pln)
+    _set_text_value("salary_exchange_rate_date", salary.exchange_rate_date)
+    _set_text_value("salary_pln_min_monthly", salary.pln_min_monthly)
+    _set_text_value("salary_pln_max_monthly", salary.pln_max_monthly)
+    _set_text_value("salary_pln_min_hourly", salary.pln_min_hourly)
+    _set_text_value("salary_pln_max_hourly", salary.pln_max_hourly)
+    _set_text_value("salary_conversion_assumptions", salary.conversion_assumptions)
+
+
+def _salary_from_session() -> SalaryInfo:
+    return SalaryInfo(
+        original_text=_text_or_unknown("salary_original_text"),
+        currency=st.session_state["salary_currency"],
+        amount_min=_parse_float_field("salary_amount_min"),
+        amount_max=_parse_float_field("salary_amount_max"),
+        period=st.session_state["salary_period"],
+        tax_type=st.session_state["salary_tax_type"],
+        exchange_rate_to_pln=_parse_float_field("salary_exchange_rate_to_pln"),
+        exchange_rate_date=st.session_state["salary_exchange_rate_date"].strip(),
+        pln_min_monthly=_parse_float_field("salary_pln_min_monthly"),
+        pln_max_monthly=_parse_float_field("salary_pln_max_monthly"),
+        pln_min_hourly=_parse_float_field("salary_pln_min_hourly"),
+        pln_max_hourly=_parse_float_field("salary_pln_max_hourly"),
+        conversion_assumptions=st.session_state[
+            "salary_conversion_assumptions"
+        ].strip(),
+    )
+
+
+def _text_or_unknown(key: str) -> str:
+    value = str(st.session_state[key]).strip()
+    return value or UNKNOWN_VALUE
+
+
+def _parse_float_field(key: str) -> float | None:
+    value = str(st.session_state[key]).strip().replace(",", ".")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _set_text_value(key: str, value: object) -> None:
+    if value is None:
+        return
+    text = str(value).strip()
+    if text:
+        st.session_state[key] = text
 
 
 def _set_if_useful(

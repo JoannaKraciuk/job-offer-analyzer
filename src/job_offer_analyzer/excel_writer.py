@@ -14,6 +14,9 @@ from job_offer_analyzer.models import (
     AvailabilityRefreshSummary,
     HistoryRecord,
     OfferRecord,
+    SalaryInfo,
+    SalaryRefreshRow,
+    SalaryRefreshSummary,
     UNKNOWN_VALUE,
 )
 from job_offer_analyzer.offer_availability import check_offer_availability
@@ -21,6 +24,7 @@ from job_offer_analyzer.offer_availability import check_offer_availability
 
 OFFERS_SHEET = "Oferty"
 HISTORY_SHEET = "Historia_Sprawdzeń"
+QUESTIONS_SHEET = "Pytania_Formularzy"
 DASHBOARD_SHEET = "Dashboard"
 
 OFFER_ID_PATTERN = re.compile(r"^JOB-(\d+)$")
@@ -69,6 +73,21 @@ VALUE_RENAMES = {
 }
 ACTIVE_DASHBOARD_EXCLUDED_STATUSES = {"Aplikowano", "Odrzucona"}
 ACTIVE_DASHBOARD_EXCLUDED_AVAILABILITY = {"Zamknięta", "Zamknieta"}
+SALARY_HEADERS = [
+    "Stawka źródłowa",
+    "Waluta",
+    "Stawka min",
+    "Stawka max",
+    "Okres stawki",
+    "Brutto/netto",
+    "Kurs waluty",
+    "Data kursu",
+    "PLN min miesięcznie",
+    "PLN max miesięcznie",
+    "PLN min godzinowo",
+    "PLN max godzinowo",
+    "Założenia przeliczenia",
+]
 
 
 def append_offer_to_workbook(workbook_path: Path, offer: OfferRecord) -> str:
@@ -80,9 +99,11 @@ def append_offer_to_workbook(workbook_path: Path, offer: OfferRecord) -> str:
     workbook = load_workbook(workbook_path)
     offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
     history_sheet = _get_sheet(workbook, HISTORY_SHEET)
+    questions_sheet = _get_sheet(workbook, QUESTIONS_SHEET)
     dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
     _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
     _normalize_sheet_headers(history_sheet, HISTORY_HEADER_RENAMES)
+    _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
     _normalize_sheet_values(offers_sheet)
     _normalize_sheet_values(history_sheet)
     _normalize_dashboard_sheet(dashboard_sheet)
@@ -90,6 +111,7 @@ def append_offer_to_workbook(workbook_path: Path, offer: OfferRecord) -> str:
     offer_id = _next_offer_id(offers_sheet)
     _append_offer_row(offers_sheet, offer_id, offer)
     _append_history_row(history_sheet, _history_from_offer(offer_id, offer))
+    _append_question_placeholder_row(questions_sheet, offer_id, offer)
     _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
 
     workbook.save(workbook_path)
@@ -110,6 +132,7 @@ def refresh_offer_availability_in_workbook(
     dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
     _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
     _normalize_sheet_headers(history_sheet, HISTORY_HEADER_RENAMES)
+    _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
     _normalize_sheet_values(offers_sheet)
     _normalize_sheet_values(history_sheet)
     _normalize_dashboard_sheet(dashboard_sheet)
@@ -181,6 +204,97 @@ def refresh_offer_availability_in_workbook(
     )
 
 
+def refresh_offer_salaries_in_workbook(workbook_path: Path) -> SalaryRefreshSummary:
+    from job_offer_analyzer.fetch_offer import fetch_offer_from_url
+
+    workbook_path = Path(workbook_path)
+    if not workbook_path.exists():
+        raise FileNotFoundError(f"Workbook does not exist: {workbook_path}")
+    _ensure_workbook_writable(workbook_path)
+
+    workbook = load_workbook(workbook_path)
+    offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
+    dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
+    _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
+    _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
+    _normalize_sheet_values(offers_sheet)
+    _normalize_dashboard_sheet(dashboard_sheet)
+
+    headers = _header_positions(offers_sheet)
+    results: list[SalaryRefreshRow] = []
+
+    for row in range(2, offers_sheet.max_row + 1):
+        offer_id = _cell_by_header(offers_sheet, row, headers, "ID")
+        link = _cell_by_header(offers_sheet, row, headers, "Link")
+        if not offer_id or not link:
+            continue
+
+        company = _cell_by_header(offers_sheet, row, headers, "Firma") or ""
+        title = _cell_by_header(offers_sheet, row, headers, "Stanowisko") or ""
+
+        try:
+            draft = fetch_offer_from_url(str(link))
+        except Exception as exc:
+            results.append(
+                SalaryRefreshRow(
+                    offer_id=str(offer_id),
+                    company=str(company),
+                    title=str(title),
+                    link=str(link),
+                    salary_display=UNKNOWN_VALUE,
+                    updated=False,
+                    note=f"Nie udało się pobrać oferty: {exc}",
+                )
+            )
+            continue
+
+        salary = draft.salary
+        if not _has_salary_values(salary):
+            results.append(
+                SalaryRefreshRow(
+                    offer_id=str(offer_id),
+                    company=str(company),
+                    title=str(title),
+                    link=str(link),
+                    salary_display=UNKNOWN_VALUE,
+                    updated=False,
+                    note="Nie znaleziono widełek płacowych w danych oferty.",
+                )
+            )
+            continue
+
+        values = {"Stawka / oczekiwania (PLN)": salary.display_value}
+        values.update(_salary_values(salary))
+        _write_values(offers_sheet, row, headers, values)
+
+        results.append(
+            SalaryRefreshRow(
+                offer_id=str(offer_id),
+                company=str(company),
+                title=str(title),
+                link=str(link),
+                salary_display=salary.display_value,
+                updated=True,
+                note="Uzupełniono stawki z linku oferty.",
+            )
+        )
+
+    _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+    workbook.save(workbook_path)
+
+    return SalaryRefreshSummary(
+        checked_count=len(results),
+        updated_count=sum(result.updated for result in results),
+        missing_count=sum(
+            not result.updated and "Nie znaleziono" in result.note for result in results
+        ),
+        failed_count=sum(
+            not result.updated and "Nie udało się" in result.note for result in results
+        ),
+        results=results,
+    )
+
+
 def _append_offer_row(sheet: Worksheet, offer_id: str, offer: OfferRecord) -> int:
     headers = _header_positions(sheet)
     row = _first_empty_row(sheet)
@@ -210,6 +324,7 @@ def _append_offer_row(sheet: Worksheet, offer_id: str, offer: OfferRecord) -> in
         "Następny krok": offer.next_step,
         "Źródło": source,
     }
+    values.update(_salary_values(offer.salary))
     _write_values(sheet, row, headers, values)
     return row
 
@@ -232,6 +347,46 @@ def _append_history_row(sheet: Worksheet, history: HistoryRecord) -> int:
     }
     _write_values(sheet, row, headers, values)
     return row
+
+
+def _append_question_placeholder_row(
+    sheet: Worksheet, offer_id: str, offer: OfferRecord
+) -> int:
+    headers = _header_positions(sheet)
+    if _question_row_exists(sheet, headers, offer_id):
+        return 0
+
+    row = _first_empty_row(sheet)
+    _copy_row_style(sheet, source_row=2, target_row=row)
+
+    values = {
+        "ID oferty": offer_id,
+        "Firma": offer.company,
+        "Stanowisko": offer.title,
+        "Pytanie z formularza": "Nie odczytano pytań z formularza aplikacyjnego",
+        "Wymagane?": "Do sprawdzenia",
+        "Szkic odpowiedzi": None,
+        "Status odpowiedzi": "Do sprawdzenia",
+        "Uwagi": (
+            "Uzupełnić po wejściu w formularz aplikacyjny. "
+            "Automatyczne pobranie opisu oferty nie zawiera pytań formularza."
+        ),
+    }
+    _write_values(sheet, row, headers, values)
+    return row
+
+
+def _question_row_exists(
+    sheet: Worksheet, headers: dict[str, int], offer_id: str
+) -> bool:
+    id_column = _column_for_header(headers, "ID oferty")
+    if id_column is None:
+        return False
+
+    for row in range(2, sheet.max_row + 1):
+        if sheet.cell(row=row, column=id_column).value == offer_id:
+            return True
+    return False
 
 
 def _history_from_offer(offer_id: str, offer: OfferRecord) -> HistoryRecord:
@@ -273,6 +428,26 @@ def _normalize_sheet_headers(sheet: Worksheet, renames: dict[str, str]) -> None:
         value = sheet.cell(row=1, column=column).value
         if isinstance(value, str) and value in renames:
             sheet.cell(row=1, column=column, value=renames[value])
+
+
+def _ensure_sheet_headers(sheet: Worksheet, headers: list[str]) -> None:
+    existing_headers = _header_positions(sheet)
+    for header in headers:
+        if _column_for_header(existing_headers, header) is not None:
+            continue
+
+        target_column = sheet.max_column + 1
+        source_cell = sheet.cell(row=1, column=target_column - 1)
+        target_cell = sheet.cell(row=1, column=target_column, value=header)
+        if source_cell.has_style:
+            target_cell.font = copy(source_cell.font)
+            target_cell.fill = copy(source_cell.fill)
+            target_cell.border = copy(source_cell.border)
+            target_cell.alignment = copy(source_cell.alignment)
+            target_cell.number_format = source_cell.number_format
+            target_cell.protection = copy(source_cell.protection)
+        existing_headers[header] = target_column
+        existing_headers[_text_key(header)] = target_column
 
 
 def _normalize_sheet_values(sheet: Worksheet) -> None:
@@ -418,6 +593,28 @@ def _column_for_header(headers: dict[str, int], header: str) -> int | None:
             return alias_column
 
     return None
+
+
+def _salary_values(salary: SalaryInfo) -> dict[str, object]:
+    return {
+        "Stawka źródłowa": salary.original_text,
+        "Waluta": salary.currency,
+        "Stawka min": salary.amount_min,
+        "Stawka max": salary.amount_max,
+        "Okres stawki": salary.period,
+        "Brutto/netto": salary.tax_type,
+        "Kurs waluty": salary.exchange_rate_to_pln,
+        "Data kursu": salary.exchange_rate_date,
+        "PLN min miesięcznie": salary.pln_min_monthly,
+        "PLN max miesięcznie": salary.pln_max_monthly,
+        "PLN min godzinowo": salary.pln_min_hourly,
+        "PLN max godzinowo": salary.pln_max_hourly,
+        "Założenia przeliczenia": salary.conversion_assumptions,
+    }
+
+
+def _has_salary_values(salary: SalaryInfo) -> bool:
+    return salary.currency != UNKNOWN_VALUE and salary.amount_min is not None
 
 
 def _text_key(text: str) -> str:

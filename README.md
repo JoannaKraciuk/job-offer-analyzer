@@ -32,6 +32,23 @@ W UI wklej link do oferty i kliknij `Pobierz dane`. Pola formularza zostaną uzu
 
 Kliknij `Sprawdź oferty`, żeby aplikacja przeszła po linkach zapisanych w arkuszu `Oferty`, zaktualizowała `Dostępność`, `Ostatnio sprawdzono`, `Historia_Sprawdzeń` oraz `Dashboard`.
 
+Kliknij `Uzupełnij stawki`, żeby aplikacja ponownie przeszła po zapisanych linkach i uzupełniła kolumny wynagrodzenia dla istniejących rekordów.
+
+## Wynagrodzenie
+
+Aplikacja próbuje wykryć widełki najpierw z danych strukturalnych oferty, np. `baseSalary`, a jeśli ich nie ma, z treści strony. Zapisuje:
+
+- oryginalny fragment ze stawką
+- walutę
+- stawkę min/max
+- okres: godzinowo, miesięcznie albo rocznie
+- brutto/netto
+- kurs waluty do PLN
+- przeliczenie na PLN miesięcznie i godzinowo
+- założenia przeliczenia
+
+MVP nie liczy podatków ani realnego netto. Do porównań używa założenia `160 h/mies.` i kursu NBP tabela A dla EUR/USD.
+
 ## Instalacja
 
 ```powershell
