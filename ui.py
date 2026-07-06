@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 import sys
 
@@ -10,15 +11,18 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from job_offer_analyzer.excel_writer import (
     append_offer_to_workbook,
+    refresh_cv_matches_in_workbook,
     refresh_offer_availability_in_workbook,
     refresh_offer_salaries_in_workbook,
 )
 from job_offer_analyzer.fetch_offer import OfferFetchError, fetch_offer_from_url
 from job_offer_analyzer.models import OfferDraft, SalaryInfo, UNKNOWN_VALUE
 from job_offer_analyzer.models import OfferRecord
+from services.cv_matcher import CvProfileError, CvProfileNotFoundError
 
 
 WORKBOOK_PATH = PROJECT_ROOT / "data" / "baza_ofert_pracy_QA.xlsx"
+CV_PROFILE_PATH = PROJECT_ROOT / "data" / "private" / "cv_profile.yml"
 
 FIELD_DEFAULTS = {
     "link": "",
@@ -29,6 +33,7 @@ FIELD_DEFAULTS = {
     "availability": "Dostępna",
     "status": "Nowa",
     "priority": UNKNOWN_VALUE,
+    "technologies": UNKNOWN_VALUE,
     "work_mode": UNKNOWN_VALUE,
     "seniority": UNKNOWN_VALUE,
     "contract_type": UNKNOWN_VALUE,
@@ -55,7 +60,7 @@ FIELD_DEFAULTS = {
 
 AVAILABILITY_OPTIONS = ["Dostępna", "Do sprawdzenia", "Niepewna", "Zamknięta"]
 STATUS_OPTIONS = ["Nowa", "Do analizy", "Do poprawy CV", "Aplikować", "Odrzucona"]
-PRIORITY_OPTIONS = [UNKNOWN_VALUE, "Wysoki", "Średni", "Niski"]
+PRIORITY_OPTIONS = [UNKNOWN_VALUE, "HIGH", "MEDIUM", "LOW"]
 WORK_MODE_OPTIONS = [UNKNOWN_VALUE, "Remote", "Hybrid", "Office"]
 SENIORITY_OPTIONS = [UNKNOWN_VALUE, "Intern", "Junior", "Mid", "Senior", "Experienced"]
 SALARY_CURRENCY_OPTIONS = [UNKNOWN_VALUE, "PLN", "EUR", "USD"]
@@ -74,7 +79,9 @@ def main() -> None:
 
     _ensure_session_defaults()
 
-    link_col, fetch_col, refresh_col, salary_refresh_col = st.columns([4, 1, 1.4, 1.4])
+    link_col, fetch_col, refresh_col, salary_refresh_col, cv_match_col = st.columns(
+        [3.4, 1, 1.25, 1.35, 1.35]
+    )
     with link_col:
         st.text_input("Link do oferty", key="link")
     with fetch_col:
@@ -86,6 +93,9 @@ def main() -> None:
     with salary_refresh_col:
         st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
         salary_refresh_clicked = st.button("Uzupełnij stawki", use_container_width=True)
+    with cv_match_col:
+        st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+        cv_match_clicked = st.button("Analizuj pod CV", use_container_width=True)
 
     if fetch_clicked:
         _fetch_link_into_form()
@@ -95,6 +105,9 @@ def main() -> None:
 
     if salary_refresh_clicked:
         _refresh_offer_salaries()
+
+    if cv_match_clicked:
+        _refresh_cv_matches()
 
     if st.session_state["fetch_message"]:
         st.success(st.session_state["fetch_message"])
@@ -147,6 +160,7 @@ def main() -> None:
             )
 
         contract_type = st.text_input("Forma umowy", key="contract_type")
+        technologies = st.text_input("Technologie", key="technologies")
 
         with st.expander("Wynagrodzenie", expanded=True):
             st.text_area(
@@ -230,6 +244,7 @@ def main() -> None:
         availability=availability,
         status=status,
         priority=priority,
+        technologies=technologies.strip() or UNKNOWN_VALUE,
         work_mode=work_mode,
         location=location.strip() or UNKNOWN_VALUE,
         contract_type=contract_type.strip() or UNKNOWN_VALUE,
@@ -311,7 +326,7 @@ def _refresh_offer_availability() -> None:
     )
 
     if summary.results:
-        st.dataframe(
+        _show_wrapped_results_table(
             [
                 {
                     "ID": result.offer_id,
@@ -323,8 +338,7 @@ def _refresh_offer_availability() -> None:
                     "Notatka": result.note,
                 }
                 for result in summary.results
-            ],
-            use_container_width=True,
+            ]
         )
 
 
@@ -348,7 +362,7 @@ def _refresh_offer_salaries() -> None:
     )
 
     if summary.results:
-        st.dataframe(
+        _show_wrapped_results_table(
             [
                 {
                     "ID": result.offer_id,
@@ -359,9 +373,117 @@ def _refresh_offer_salaries() -> None:
                     "Notatka": result.note,
                 }
                 for result in summary.results
-            ],
-            use_container_width=True,
+            ]
         )
+
+
+def _refresh_cv_matches() -> None:
+    selected_link = st.session_state["link"].strip() or None
+    try:
+        with st.spinner("Analizuję dopasowanie ofert do profilu..."):
+            summary = refresh_cv_matches_in_workbook(
+                WORKBOOK_PATH,
+                CV_PROFILE_PATH,
+                selected_link=selected_link,
+            )
+    except CvProfileNotFoundError as exc:
+        st.error(str(exc))
+        return
+    except CvProfileError as exc:
+        st.error(f"Profil CV ma nieprawidłowy format: {exc}")
+        return
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Nie udało się przeanalizować dopasowania do CV: {exc}")
+        return
+
+    st.success(
+        "Przeanalizowano "
+        f"{summary.checked_count} ofert. "
+        f"Zaktualizowano {summary.updated_count}, "
+        f"błędów: {summary.failed_count}."
+    )
+
+    if summary.results:
+        _show_wrapped_results_table(
+            [
+                {
+                    "ID": result.offer_id,
+                    "Firma": result.company,
+                    "Stanowisko": result.title,
+                    "Wynik": f"{result.match_score}%",
+                    "Priorytet": result.priority,
+                    "Dopasowane": "; ".join(result.matched_skills),
+                    "Braki": "; ".join(result.missing_skills),
+                    "Notatka": result.note,
+                }
+                for result in summary.results
+            ]
+        )
+
+
+def _show_wrapped_results_table(rows: list[dict[str, object]]) -> None:
+    if not rows:
+        return
+
+    columns = list(rows[0].keys())
+    header_html = "".join(f"<th>{escape(column)}</th>" for column in columns)
+    rows_html = []
+    for row in rows:
+        cells = []
+        for column in columns:
+            css_class = " class='note-cell'" if column == "Notatka" else ""
+            value = "" if row.get(column) is None else str(row.get(column))
+            cells.append(f"<td{css_class}>{escape(value)}</td>")
+        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(
+        f"""
+        <style>
+            .wrapped-results {{
+                overflow-x: auto;
+                margin-top: 0.75rem;
+            }}
+            .wrapped-results table {{
+                width: 100%;
+                min-width: 900px;
+                border-collapse: collapse;
+                font-size: 0.875rem;
+            }}
+            .wrapped-results th {{
+                background: #1f4e78;
+                color: #ffffff;
+                border: 1px solid #b7c9e2;
+                padding: 0.45rem 0.6rem;
+                text-align: left;
+                vertical-align: top;
+                white-space: nowrap;
+            }}
+            .wrapped-results td {{
+                border: 1px solid #d9e2f3;
+                padding: 0.45rem 0.6rem;
+                vertical-align: top;
+                white-space: nowrap;
+            }}
+            .wrapped-results .note-cell {{
+                min-width: 360px;
+                max-width: 640px;
+                white-space: normal;
+                overflow-wrap: anywhere;
+                line-height: 1.35;
+            }}
+        </style>
+        <div class="wrapped-results">
+            <table>
+                <thead><tr>{header_html}</tr></thead>
+                <tbody>{''.join(rows_html)}</tbody>
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _apply_draft(draft: OfferDraft) -> None:
@@ -370,6 +492,7 @@ def _apply_draft(draft: OfferDraft) -> None:
     _set_if_useful("location", draft.location)
     _set_if_useful("work_mode", draft.work_mode, allowed_values=WORK_MODE_OPTIONS)
     _set_if_useful("contract_type", draft.contract_type)
+    _set_if_useful("technologies", draft.technologies)
     _set_if_useful("rate_expectations", draft.rate_expectations)
     _set_if_useful("seniority", draft.seniority, allowed_values=SENIORITY_OPTIONS)
     _apply_salary(draft.salary)

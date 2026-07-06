@@ -1,53 +1,38 @@
-# Job Offer Analyzer
+# Job Offer Tracker
 
-Minimalny pierwszy krok narzędzia AI do śledzenia ofert pracy.
+Job Offer Tracker pomaga uporządkować aplikowanie na oferty pracy QA/IT. Aplikacja zbiera dane z linków do ogłoszeń, zapisuje je w jednym pliku Excel i pozwala szybko sprawdzić, które oferty wymagają kolejnej akcji.
 
-Aktualny zakres:
+Excel jest w tym MVP warstwą przechowywania i raportowania danych. Plik `.xlsx` działa jak lokalna baza ofert, historia sprawdzeń oraz dashboard do codziennej pracy nad aplikacjami.
 
-- trzyma roboczą kopię pliku Excel w `data/`
-- dodaje jedną testową ofertę do arkusza `Oferty`
-- dodaje jeden wpis kontrolny do arkusza `Historia_Sprawdzeń`
-- automatycznie generuje kolejny identyfikator `JOB-XXX`
-- pobiera treść oferty z linku i uzupełnia formularz danymi znalezionymi na stronie
+## Aktualne funkcje
 
-Uruchomienie:
+- pobieranie danych z URL oferty pracy
+- ręczna korekta danych przed zapisem
+- zapis nowych ofert do arkusza `Oferty`
+- wykrywanie duplikatów po linku
+- aktualizacja dostępności istniejących ofert
+- uzupełnianie stawek i przeliczeń wynagrodzenia
+- automatyczne wykrywanie portalu na podstawie URL
+- zapisywanie historii akcji i sprawdzeń
+- porządkowanie dashboardu i najbliższych działań
 
-```powershell
-python app.py
-```
+## Struktura danych w Excelu
 
-Opcjonalne dane testowe:
+Główne arkusze:
 
-```powershell
-python app.py --company "Example Corp" --title "Junior QA Engineer" --link "https://example.com/job"
-```
+- `Oferty` - aktualna lista ofert i status procesu
+- `Analiza_CV` - miejsce na analizę wymagań oferty względem profilu kandydata
+- `Historia_Sprawdzen` / `Historia_Sprawdzeń` - dziennik akcji: dodanie, aktualizacja, niedostępność albo pominięcie duplikatu
+- `Pytania_Formularzy` - miejsce na pytania z formularzy aplikacyjnych
+- `Dashboard` - podsumowanie i najbliższe działania
 
-Uruchomienie UI w przeglądarce:
+Najważniejsze kolumny raportowe w `Oferty`:
 
-```powershell
-streamlit run ui.py
-```
-
-W UI wklej link do oferty i kliknij `Pobierz dane`. Pola formularza zostaną uzupełnione automatycznie, ale przed zapisem nadal można je ręcznie poprawić.
-
-Kliknij `Sprawdź oferty`, żeby aplikacja przeszła po linkach zapisanych w arkuszu `Oferty`, zaktualizowała `Dostępność`, `Ostatnio sprawdzono`, `Historia_Sprawdzeń` oraz `Dashboard`.
-
-Kliknij `Uzupełnij stawki`, żeby aplikacja ponownie przeszła po zapisanych linkach i uzupełniła kolumny wynagrodzenia dla istniejących rekordów.
-
-## Wynagrodzenie
-
-Aplikacja próbuje wykryć widełki najpierw z danych strukturalnych oferty, np. `baseSalary`, a jeśli ich nie ma, z treści strony. Zapisuje:
-
-- oryginalny fragment ze stawką
-- walutę
-- stawkę min/max
-- okres: godzinowo, miesięcznie albo rocznie
-- brutto/netto
-- kurs waluty do PLN
-- przeliczenie na PLN miesięcznie i godzinowo
-- założenia przeliczenia
-
-MVP nie liczy podatków ani realnego netto. Do porównań używa założenia `160 h/mies.` i kursu NBP tabela A dla EUR/USD.
+- `Match Score` - liczbowy wynik dopasowania, np. `82`
+- `Priority` - `HIGH`, `MEDIUM` albo `LOW`
+- `Technologie` - technologie rozdzielone średnikiem, np. `Python; Playwright; SQL; API`
+- `Portal` - wykryte źródło oferty, np. `Just Join IT`, `No Fluff Jobs`, `LinkedIn`, `TestDevJobs` albo `Unknown`
+- `Ostatnia akcja` - ostatni etap procesu, np. `Dodano`, `Zaktualizowano`, `CV wysłane`, `HR`, `Techniczna`, `Oferta`, `Odrzucona`
 
 ## Instalacja
 
@@ -56,12 +41,22 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Uruchomienie
+## Uruchomienie UI
 
 ```powershell
 .\.venv\Scripts\python.exe -m streamlit run ui.py
 ```
 
+Po uruchomieniu wklej link do oferty, kliknij `Pobierz dane`, popraw pola w formularzu, jeśli trzeba, i zapisz ofertę do Excela.
+
 ## Dane prywatne
 
 Pliki `.xlsx` w katalogu `data/` są ignorowane przez Git. Nie commituj realnej bazy ofert, backupów ani prywatnych linków aplikacyjnych.
+
+Prywatne dane profilu CV powinny znajdować się w `data/private/cv_profile.yml`. Katalog `data/private/` jest ignorowany przez Git.
+
+## Planned Features
+
+- CV matching
+- AI analysis
+- market trends dashboard

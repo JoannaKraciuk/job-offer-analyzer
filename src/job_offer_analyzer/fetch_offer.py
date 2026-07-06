@@ -107,7 +107,9 @@ def fetch_offer_from_url(url: str) -> OfferDraft:
     job_posting = _find_job_posting(soup)
     page_text = _clean_text_from_soup(soup)
     description_text = _clean_html_text(_job_value(job_posting, "description"))
-    source_text = description_text or page_text
+    structured_skills = _skills_from_job_posting(job_posting)
+    structured_text = _structured_text_from_job_posting(job_posting)
+    source_text = _merge_text_blocks(description_text, structured_text) or page_text
 
     title = (
         _text_or_empty(_job_value(job_posting, "title"))
@@ -135,6 +137,7 @@ def fetch_offer_from_url(url: str) -> OfferDraft:
         location=_trim(location, 180) or UNKNOWN_VALUE,
         work_mode=work_mode or UNKNOWN_VALUE,
         contract_type=_infer_contract_type(source_text),
+        technologies=_technologies_text(structured_skills),
         rate_expectations=salary.display_value,
         salary=salary,
         seniority=_infer_from_keywords(source_text, SENIORITY_KEYWORDS) or UNKNOWN_VALUE,
@@ -219,6 +222,77 @@ def _walk_json_for_job_posting(data) -> dict:
 
 def _job_value(job_posting: dict, key: str):
     return job_posting.get(key) if job_posting else None
+
+
+def _structured_text_from_job_posting(job_posting: dict) -> str:
+    if not job_posting:
+        return ""
+
+    parts: list[str] = []
+    skills = _skills_from_job_posting(job_posting)
+    if skills:
+        parts.append(f"Wymagania / skills: {'; '.join(skills)}")
+
+    experience_requirements = _structured_value_text(
+        _job_value(job_posting, "experienceRequirements")
+    )
+    if experience_requirements:
+        parts.append(f"Doświadczenie: {experience_requirements}")
+
+    occupational_category = _structured_value_text(
+        _job_value(job_posting, "occupationalCategory")
+    )
+    if occupational_category:
+        parts.append(f"Kategoria: {occupational_category}")
+
+    return "\n".join(parts)
+
+
+def _skills_from_job_posting(job_posting: dict) -> list[str]:
+    skills = _job_value(job_posting, "skills")
+    skill_items = skills if isinstance(skills, list) else [skills]
+    values: list[str] = []
+
+    for item in skill_items:
+        if isinstance(item, dict):
+            values.append(_text_or_empty(item.get("value") or item.get("name")))
+        else:
+            values.append(_text_or_empty(item))
+
+    return [value for value in _dedupe_lines(values) if value]
+
+
+def _technologies_text(skills: list[str]) -> str:
+    return "; ".join(skills) if skills else UNKNOWN_VALUE
+
+
+def _structured_value_text(value) -> str:
+    if isinstance(value, dict):
+        values = [
+            _structured_value_text(item)
+            for item in value.values()
+            if item not in (None, "")
+        ]
+        return _trim("; ".join(item for item in values if item), MAX_SUMMARY_LENGTH)
+    if isinstance(value, list):
+        values = [_structured_value_text(item) for item in value if item not in (None, "")]
+        return _trim("; ".join(item for item in values if item), MAX_SUMMARY_LENGTH)
+    return _text_or_empty(value)
+
+
+def _merge_text_blocks(*blocks: str) -> str:
+    merged_blocks = []
+    seen: set[str] = set()
+    for block in blocks:
+        cleaned_block = _clean_whitespace(block)
+        if not cleaned_block:
+            continue
+        key = cleaned_block.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_blocks.append(cleaned_block)
+    return "\n".join(merged_blocks)
 
 
 def _company_from_job_posting(job_posting: dict) -> str:

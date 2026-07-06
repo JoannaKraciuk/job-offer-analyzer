@@ -53,6 +53,7 @@ class OfferRecord:
     status: str = "Nowa"
     cv_match: str = UNKNOWN_VALUE
     priority: str = UNKNOWN_VALUE
+    technologies: str = UNKNOWN_VALUE
     work_mode: str = UNKNOWN_VALUE
     location: str = UNKNOWN_VALUE
     contract_type: str = UNKNOWN_VALUE
@@ -88,6 +89,7 @@ class OfferDraft:
     location: str = UNKNOWN_VALUE
     work_mode: str = UNKNOWN_VALUE
     contract_type: str = UNKNOWN_VALUE
+    technologies: str = UNKNOWN_VALUE
     rate_expectations: str = UNKNOWN_VALUE
     salary: SalaryInfo = field(default_factory=SalaryInfo)
     seniority: str = UNKNOWN_VALUE
@@ -137,6 +139,29 @@ class SalaryRefreshSummary:
     missing_count: int
     failed_count: int
     results: list[SalaryRefreshRow]
+
+
+@dataclass(frozen=True)
+class CvMatchRefreshRow:
+    offer_id: str
+    company: str
+    title: str
+    link: str
+    match_score: int
+    priority: str
+    matched_skills: list[str]
+    missing_skills: list[str]
+    updated: bool
+    note: str
+
+
+@dataclass(frozen=True)
+class CvMatchRefreshSummary:
+    checked_count: int
+    updated_count: int
+    skipped_count: int
+    failed_count: int
+    results: list[CvMatchRefreshRow]
 
 
 def _format_number(value: float) -> str:

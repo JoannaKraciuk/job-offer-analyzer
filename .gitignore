@@ -20,6 +20,10 @@ logs/
 # Secrets and local config
 .env
 .env.*
+data/private/
+cv_profile.yml
+cv.txt
+cv.md
 
 # Private/local Excel workbooks
 data/*.xlsx

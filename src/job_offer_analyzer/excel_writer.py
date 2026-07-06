@@ -5,13 +5,17 @@ from datetime import date
 from pathlib import Path
 import re
 import unicodedata
+from urllib.parse import urlparse
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from job_offer_analyzer.models import (
     AvailabilityRefreshRow,
     AvailabilityRefreshSummary,
+    CvMatchRefreshRow,
+    CvMatchRefreshSummary,
     HistoryRecord,
     OfferRecord,
     SalaryInfo,
@@ -25,6 +29,8 @@ from job_offer_analyzer.offer_availability import check_offer_availability
 OFFERS_SHEET = "Oferty"
 HISTORY_SHEET = "Historia_Sprawdzeń"
 QUESTIONS_SHEET = "Pytania_Formularzy"
+CV_MATCH_SHEET = "Analiza_CV"
+LEGACY_CV_MATCH_SHEET = "Dopasowanie_CV"
 DASHBOARD_SHEET = "Dashboard"
 
 OFFER_ID_PATTERN = re.compile(r"^JOB-(\d+)$")
@@ -39,6 +45,9 @@ HEADER_ALIASES = {
         "Stawka / oczekiwania (USD)",
     ],
 }
+SHEET_ALIASES = {
+    CV_MATCH_SHEET: [LEGACY_CV_MATCH_SHEET],
+}
 OFFER_HEADER_RENAMES = {
     "Dostepnosc": "Dostępność",
     "Forma": "Forma umowy",
@@ -47,9 +56,17 @@ OFFER_HEADER_RENAMES = {
     "Nice-to-have skrot": "Nice-to-have skrót",
     "Nastepny krok": "Następny krok",
     "Zrodlo": "Źródło",
+    "Dopasowanie do CV": "Dopasowanie do CV",
+    "Priorytet": "Priorytet",
 }
 HISTORY_HEADER_RENAMES = {
     "Zrodlo": "Źródło",
+}
+CV_MATCH_HEADER_RENAMES = {
+    "Czy mam w CV?": "Czy mam w profilu",
+    "Dowód z CV / projekt": "Dowód / skill",
+    "Co dopisać / poprawić w CV": "Brak / do nauki",
+    "Notatka": "Komentarz",
 }
 DASHBOARD_TEXT_RENAMES = {
     "Baza ofert pracy - dashboard": "Baza ofert pracy - dashboard",
@@ -73,6 +90,35 @@ VALUE_RENAMES = {
 }
 ACTIVE_DASHBOARD_EXCLUDED_STATUSES = {"Aplikowano", "Odrzucona"}
 ACTIVE_DASHBOARD_EXCLUDED_AVAILABILITY = {"Zamknięta", "Zamknieta"}
+TECHNOLOGY_ALIASES = {
+    "Playwright": ["playwright"],
+    "Cypress": ["cypress"],
+    "Selenium": ["selenium"],
+    "Python": ["python", "pytest"],
+    "JavaScript": ["javascript", "js"],
+    "TypeScript": ["typescript", "ts"],
+    "Java": ["java"],
+    "C#": ["c#", "c sharp", "csharp"],
+    "API": ["api testing", "api tests", "rest api", "postman", "api"],
+    "SQL": ["sql"],
+    "WCAG": ["wcag", "accessibility", "a11y"],
+    "Allure": ["allure"],
+    "Git": ["git", "github", "gitlab", "bitbucket"],
+    "CI/CD": ["ci/cd", "cicd", "github actions", "jenkins"],
+    "Docker": ["docker"],
+    "Jira": ["jira", "confluence"],
+    "TestRail": ["testrail", "test rail"],
+    "Robot Framework": ["robot framework"],
+    "Cucumber": ["cucumber", "gherkin", "bdd"],
+    "Manual testing": ["manual testing", "manual tests"],
+    "Test automation": ["test automation", "automated tests", "automation testing"],
+    "Regression testing": ["regression testing", "regression tests"],
+    "Performance testing": ["performance testing", "load testing", "jmeter"],
+    "Security testing": ["security testing", "penetration testing"],
+    "Mobile testing": ["mobile testing", "android", "ios"],
+    "Agile": ["agile", "scrum", "kanban"],
+    "AI coding assistants": ["ai coding", "ai assistant", "copilot", "chatgpt"],
+}
 SALARY_HEADERS = [
     "Stawka źródłowa",
     "Waluta",
@@ -88,6 +134,23 @@ SALARY_HEADERS = [
     "PLN max godzinowo",
     "Założenia przeliczenia",
 ]
+OFFER_TRACKING_HEADERS = [
+    "Match Score",
+    "Priority",
+    "Technologie",
+    "Portal",
+    "Ostatnia akcja",
+]
+OFFER_MATCH_HEADERS = ["Braki / do nauki"]
+CV_MATCH_HEADERS = ["Link"]
+AUTO_MATCH_CATEGORY = "Automatyczne dopasowanie"
+TABLE_NAMES = {
+    OFFERS_SHEET: "OfertyTable",
+    CV_MATCH_SHEET: "DopasowanieTable",
+    LEGACY_CV_MATCH_SHEET: "DopasowanieTable",
+    QUESTIONS_SHEET: "PytaniaTable",
+    HISTORY_SHEET: "HistoriaTable",
+}
 
 
 def append_offer_to_workbook(workbook_path: Path, offer: OfferRecord) -> str:
@@ -97,6 +160,7 @@ def append_offer_to_workbook(workbook_path: Path, offer: OfferRecord) -> str:
     _ensure_workbook_writable(workbook_path)
 
     workbook = load_workbook(workbook_path)
+    _normalize_workbook_sheets(workbook)
     offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
     history_sheet = _get_sheet(workbook, HISTORY_SHEET)
     questions_sheet = _get_sheet(workbook, QUESTIONS_SHEET)
@@ -104,15 +168,35 @@ def append_offer_to_workbook(workbook_path: Path, offer: OfferRecord) -> str:
     _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
     _normalize_sheet_headers(history_sheet, HISTORY_HEADER_RENAMES)
     _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_TRACKING_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_MATCH_HEADERS)
     _normalize_sheet_values(offers_sheet)
     _normalize_sheet_values(history_sheet)
+    _normalize_history_actions(history_sheet)
     _normalize_dashboard_sheet(dashboard_sheet)
+    _backfill_offer_tracking_columns(offers_sheet, history_sheet=history_sheet)
+
+    duplicate_offer_id = _find_offer_id_by_link(offers_sheet, offer.link)
+    if duplicate_offer_id:
+        _append_history_row(
+            history_sheet,
+            _history_duplicate_offer(duplicate_offer_id, offer),
+        )
+        _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+        _resize_known_table(offers_sheet)
+        _resize_known_table(questions_sheet)
+        _resize_known_table(history_sheet)
+        workbook.save(workbook_path)
+        return duplicate_offer_id
 
     offer_id = _next_offer_id(offers_sheet)
     _append_offer_row(offers_sheet, offer_id, offer)
     _append_history_row(history_sheet, _history_from_offer(offer_id, offer))
     _append_question_placeholder_row(questions_sheet, offer_id, offer)
     _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+    _resize_known_table(offers_sheet)
+    _resize_known_table(questions_sheet)
+    _resize_known_table(history_sheet)
 
     workbook.save(workbook_path)
     return offer_id
@@ -127,15 +211,20 @@ def refresh_offer_availability_in_workbook(
     _ensure_workbook_writable(workbook_path)
 
     workbook = load_workbook(workbook_path)
+    _normalize_workbook_sheets(workbook)
     offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
     history_sheet = _get_sheet(workbook, HISTORY_SHEET)
     dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
     _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
     _normalize_sheet_headers(history_sheet, HISTORY_HEADER_RENAMES)
     _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_TRACKING_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_MATCH_HEADERS)
     _normalize_sheet_values(offers_sheet)
     _normalize_sheet_values(history_sheet)
+    _normalize_history_actions(history_sheet)
     _normalize_dashboard_sheet(dashboard_sheet)
+    _backfill_offer_tracking_columns(offers_sheet, history_sheet=history_sheet)
 
     headers = _header_positions(offers_sheet)
     results: list[AvailabilityRefreshRow] = []
@@ -159,8 +248,15 @@ def refresh_offer_availability_in_workbook(
         )
         _set_cell_by_header(offers_sheet, row, headers, "Ostatnio sprawdzono", today)
         _set_cell_by_header(offers_sheet, row, headers, "Dni od sprawdzenia", 0)
+        _set_cell_by_header(offers_sheet, row, headers, "Portal", _detect_portal(str(link)))
+        _set_cell_by_header(offers_sheet, row, headers, "Ostatnia akcja", "Zaktualizowano")
 
         changed = previous_availability != availability_result.availability
+        history_result = (
+            "Niedostępna"
+            if availability_result.availability == "Zamknięta"
+            else "Zaktualizowano"
+        )
         results.append(
             AvailabilityRefreshRow(
                 offer_id=str(offer_id),
@@ -181,10 +277,11 @@ def refresh_offer_availability_in_workbook(
                 company=str(company),
                 title=str(title),
                 link=str(link),
-                result=availability_result.availability,
+                result=history_result,
                 checked_scope="Automatyczne sprawdzenie dostępności",
                 note=(
                     f"Poprzednia dostępność: {previous_availability}. "
+                    f"Obecna dostępność: {availability_result.availability}. "
                     f"{availability_result.note}"
                 ),
                 source=availability_result.final_url or str(link),
@@ -192,6 +289,8 @@ def refresh_offer_availability_in_workbook(
         )
 
     _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+    _resize_known_table(offers_sheet)
+    _resize_known_table(history_sheet)
     workbook.save(workbook_path)
 
     return AvailabilityRefreshSummary(
@@ -213,15 +312,24 @@ def refresh_offer_salaries_in_workbook(workbook_path: Path) -> SalaryRefreshSumm
     _ensure_workbook_writable(workbook_path)
 
     workbook = load_workbook(workbook_path)
+    _normalize_workbook_sheets(workbook)
     offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
+    history_sheet = _get_sheet(workbook, HISTORY_SHEET)
     dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
     _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
+    _normalize_sheet_headers(history_sheet, HISTORY_HEADER_RENAMES)
     _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_TRACKING_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_MATCH_HEADERS)
     _normalize_sheet_values(offers_sheet)
+    _normalize_sheet_values(history_sheet)
+    _normalize_history_actions(history_sheet)
     _normalize_dashboard_sheet(dashboard_sheet)
+    _backfill_offer_tracking_columns(offers_sheet, history_sheet=history_sheet)
 
     headers = _header_positions(offers_sheet)
     results: list[SalaryRefreshRow] = []
+    today = date.today()
 
     for row in range(2, offers_sheet.max_row + 1):
         offer_id = _cell_by_header(offers_sheet, row, headers, "ID")
@@ -266,6 +374,22 @@ def refresh_offer_salaries_in_workbook(workbook_path: Path) -> SalaryRefreshSumm
         values = {"Stawka / oczekiwania (PLN)": salary.display_value}
         values.update(_salary_values(salary))
         _write_values(offers_sheet, row, headers, values)
+        _set_cell_by_header(offers_sheet, row, headers, "Portal", _detect_portal(str(link)))
+        _set_cell_by_header(offers_sheet, row, headers, "Ostatnia akcja", "Zaktualizowano")
+        _append_history_row(
+            history_sheet,
+            HistoryRecord(
+                checked_at=today,
+                offer_id=str(offer_id),
+                company=str(company),
+                title=str(title),
+                link=str(link),
+                result="Zaktualizowano",
+                checked_scope="Aktualizacja stawek",
+                note=f"Uzupełniono stawki z linku oferty: {salary.display_value}.",
+                source=str(link),
+            ),
+        )
 
         results.append(
             SalaryRefreshRow(
@@ -280,6 +404,8 @@ def refresh_offer_salaries_in_workbook(workbook_path: Path) -> SalaryRefreshSumm
         )
 
     _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+    _resize_known_table(offers_sheet)
+    _resize_known_table(history_sheet)
     workbook.save(workbook_path)
 
     return SalaryRefreshSummary(
@@ -291,6 +417,183 @@ def refresh_offer_salaries_in_workbook(workbook_path: Path) -> SalaryRefreshSumm
         failed_count=sum(
             not result.updated and "Nie udało się" in result.note for result in results
         ),
+        results=results,
+    )
+
+
+def refresh_cv_matches_in_workbook(
+    workbook_path: Path, profile_path: Path, selected_link: str | None = None
+) -> CvMatchRefreshSummary:
+    from job_offer_analyzer.fetch_offer import fetch_offer_from_url
+    from services.cv_matcher import (
+        load_candidate_profile,
+        match_offer_to_profile,
+    )
+
+    workbook_path = Path(workbook_path)
+    if not workbook_path.exists():
+        raise FileNotFoundError(f"Workbook does not exist: {workbook_path}")
+    _ensure_workbook_writable(workbook_path)
+
+    profile = load_candidate_profile(Path(profile_path))
+    workbook = load_workbook(workbook_path)
+    _normalize_workbook_sheets(workbook)
+    offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
+    cv_match_sheet = _get_sheet(workbook, CV_MATCH_SHEET)
+    dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
+
+    _normalize_sheet_headers(offers_sheet, OFFER_HEADER_RENAMES)
+    _normalize_sheet_headers(cv_match_sheet, CV_MATCH_HEADER_RENAMES)
+    _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_TRACKING_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_MATCH_HEADERS)
+    _ensure_sheet_headers(cv_match_sheet, CV_MATCH_HEADERS)
+    _normalize_sheet_values(offers_sheet)
+    _normalize_dashboard_sheet(dashboard_sheet)
+    _backfill_offer_tracking_columns(offers_sheet, cv_match_sheet)
+
+    offers_headers = _header_positions(offers_sheet)
+    cv_headers = _header_positions(cv_match_sheet)
+    results: list[CvMatchRefreshRow] = []
+    normalized_selected_link = selected_link.strip() if selected_link else ""
+    matched_selected_link = False
+
+    for row in range(2, offers_sheet.max_row + 1):
+        offer_id = _cell_by_header(offers_sheet, row, offers_headers, "ID")
+        link = _cell_by_header(offers_sheet, row, offers_headers, "Link")
+        if not offer_id or not link:
+            continue
+
+        link_text = str(link).strip()
+        if normalized_selected_link:
+            if link_text != normalized_selected_link:
+                continue
+            matched_selected_link = True
+        elif _has_cv_match_value(
+            _cell_by_header(offers_sheet, row, offers_headers, "Match Score")
+        ) or _has_cv_match_value(
+            _cell_by_header(offers_sheet, row, offers_headers, "Dopasowanie do CV")
+        ):
+            continue
+
+        company = str(_cell_by_header(offers_sheet, row, offers_headers, "Firma") or "")
+        title = str(_cell_by_header(offers_sheet, row, offers_headers, "Stanowisko") or "")
+        fallback_text = _offer_text_from_row(offers_sheet, row, offers_headers)
+        fetch_note = ""
+
+        try:
+            draft = fetch_offer_from_url(link_text)
+            offer_text = " ".join(
+                value
+                for value in [
+                    draft.title,
+                    draft.company,
+                    draft.must_have_summary,
+                    draft.nice_to_have_summary,
+                    draft.risks_notes,
+                    draft.source_text,
+                ]
+                if value and value != UNKNOWN_VALUE
+            )
+        except Exception as exc:
+            offer_text = fallback_text
+            fetch_note = f"Nie pobrano strony, użyto danych z arkusza: {exc}"
+
+        match_result = match_offer_to_profile(offer_text, profile)
+        _set_cell_by_header(
+            offers_sheet,
+            row,
+            offers_headers,
+            "Match Score",
+            match_result.match_score,
+        )
+        _set_cell_by_header(
+            offers_sheet,
+            row,
+            offers_headers,
+            "Priority",
+            _normalize_priority(match_result.priority),
+        )
+        _set_cell_by_header(
+            offers_sheet,
+            row,
+            offers_headers,
+            "Technologie",
+            _technologies_from_match_result(match_result),
+        )
+        _set_cell_by_header(offers_sheet, row, offers_headers, "Portal", _detect_portal(link_text))
+        _set_cell_by_header(offers_sheet, row, offers_headers, "Ostatnia akcja", "Zaktualizowano")
+        _set_cell_by_header(
+            offers_sheet,
+            row,
+            offers_headers,
+            "Dopasowanie do CV",
+            f"{match_result.match_score}%",
+        )
+        _set_cell_by_header(
+            offers_sheet, row, offers_headers, "Priorytet", match_result.priority
+        )
+        _set_cell_by_header(
+            offers_sheet,
+            row,
+            offers_headers,
+            "Braki / do nauki",
+            _missing_skills_text(match_result),
+        )
+
+        _clear_auto_cv_match_rows(cv_match_sheet, cv_headers, str(offer_id))
+        _append_cv_match_rows(
+            cv_match_sheet,
+            cv_headers,
+            offer_id=str(offer_id),
+            company=company,
+            title=title,
+            link=link_text,
+            match_result=match_result,
+            fetch_note=fetch_note,
+        )
+
+        results.append(
+            CvMatchRefreshRow(
+                offer_id=str(offer_id),
+                company=company,
+                title=title,
+                link=link_text,
+                match_score=match_result.match_score,
+                priority=match_result.priority,
+                matched_skills=match_result.matched_skills,
+                missing_skills=match_result.missing_skills,
+                updated=True,
+                note=match_result.short_reason if not fetch_note else f"{match_result.short_reason} {fetch_note}",
+            )
+        )
+
+    if normalized_selected_link and not matched_selected_link:
+        results.append(
+            CvMatchRefreshRow(
+                offer_id="",
+                company="",
+                title="",
+                link=normalized_selected_link,
+                match_score=0,
+                priority="LOW",
+                matched_skills=[],
+                missing_skills=[],
+                updated=False,
+                note="Nie znaleziono zapisanej oferty z podanym linkiem.",
+            )
+        )
+
+    _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+    _resize_known_table(offers_sheet)
+    _resize_known_table(cv_match_sheet)
+    workbook.save(workbook_path)
+
+    return CvMatchRefreshSummary(
+        checked_count=len(results),
+        updated_count=sum(result.updated for result in results),
+        skipped_count=0,
+        failed_count=sum(not result.updated for result in results),
         results=results,
     )
 
@@ -311,7 +614,12 @@ def _append_offer_row(sheet: Worksheet, offer_id: str, offer: OfferRecord) -> in
         "Dostępność": offer.availability,
         "Status": offer.status,
         "Dopasowanie do CV": offer.cv_match,
-        "Priorytet": offer.priority,
+        "Priorytet": _normalize_priority(offer.priority),
+        "Match Score": _parse_match_score(offer.cv_match),
+        "Priority": _normalize_priority(offer.priority),
+        "Technologie": _technology_text(offer.technologies),
+        "Portal": _detect_portal(offer.link),
+        "Ostatnia akcja": "Dodano",
         "Tryb": offer.work_mode,
         "Lokalizacja": offer.location,
         "Forma umowy": offer.contract_type,
@@ -323,6 +631,7 @@ def _append_offer_row(sheet: Worksheet, offer_id: str, offer: OfferRecord) -> in
         "Ryzyka / uwagi": offer.risks_notes,
         "Następny krok": offer.next_step,
         "Źródło": source,
+        "Braki / do nauki": UNKNOWN_VALUE,
     }
     values.update(_salary_values(offer.salary))
     _write_values(sheet, row, headers, values)
@@ -389,6 +698,95 @@ def _question_row_exists(
     return False
 
 
+def _offer_text_from_row(
+    sheet: Worksheet, row: int, headers: dict[str, int]
+) -> str:
+    text_headers = [
+        "Firma",
+        "Stanowisko",
+        "Technologie",
+        "Tryb",
+        "Lokalizacja",
+        "Forma umowy",
+        "Poziom",
+        "Must-have skrót",
+        "Nice-to-have skrót",
+        "Ryzyka / uwagi",
+        "Stawka / oczekiwania (PLN)",
+    ]
+    values = [
+        str(value)
+        for header in text_headers
+        if (value := _cell_by_header(sheet, row, headers, header))
+        and str(value) != UNKNOWN_VALUE
+    ]
+    return " ".join(values)
+
+
+def _has_cv_match_value(value: object) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return text not in {"", "TBD", UNKNOWN_VALUE}
+
+
+def _missing_skills_text(match_result) -> str:
+    if not match_result.missing_skills:
+        return "Brak wykrytych braków"
+    return "; ".join(match_result.missing_skills)
+
+
+def _clear_auto_cv_match_rows(
+    sheet: Worksheet, headers: dict[str, int], offer_id: str
+) -> None:
+    id_column = _column_for_header(headers, "ID oferty")
+    category_column = _column_for_header(headers, "Kategoria")
+    if id_column is None or category_column is None:
+        return
+
+    for row in range(2, sheet.max_row + 1):
+        if sheet.cell(row=row, column=id_column).value != offer_id:
+            continue
+        if sheet.cell(row=row, column=category_column).value != AUTO_MATCH_CATEGORY:
+            continue
+        for column in range(1, sheet.max_column + 1):
+            sheet.cell(row=row, column=column).value = None
+
+
+def _append_cv_match_rows(
+    sheet: Worksheet,
+    headers: dict[str, int],
+    offer_id: str,
+    company: str,
+    title: str,
+    link: str,
+    match_result,
+    fetch_note: str,
+) -> None:
+    for requirement in match_result.requirements:
+        row = _first_empty_row(sheet)
+        _copy_row_style(sheet, source_row=2, target_row=row)
+        comment = requirement.comment
+        if fetch_note:
+            comment = f"{comment} {fetch_note}"
+
+        values = {
+            "ID oferty": offer_id,
+            "Firma": company,
+            "Stanowisko": title,
+            "Link": link,
+            "Kategoria": AUTO_MATCH_CATEGORY,
+            "Wymaganie z oferty": requirement.requirement,
+            "Czy mam w profilu": "Tak" if requirement.has_skill else "Nie",
+            "Dowód / skill": requirement.evidence,
+            "Siła dopasowania": f"{match_result.match_score}%",
+            "Brak / do nauki": requirement.missing_skill,
+            "Ważność": match_result.priority,
+            "Komentarz": comment,
+        }
+        _write_values(sheet, row, headers, values)
+
+
 def _history_from_offer(offer_id: str, offer: OfferRecord) -> HistoryRecord:
     return HistoryRecord(
         checked_at=offer.last_checked_at,
@@ -396,17 +794,39 @@ def _history_from_offer(offer_id: str, offer: OfferRecord) -> HistoryRecord:
         company=offer.company,
         title=offer.title,
         link=offer.link,
-        result=offer.availability,
-        checked_scope="Ręczny wpis testowy",
-        note="Dodano testową ofertę przez pierwszy moduł zapisu do Excela.",
+        result="Dodano",
+        checked_scope="Dodanie oferty",
+        note="Dodano ofertę do arkusza Oferty.",
         source=offer.source or offer.link,
     )
 
 
+def _history_duplicate_offer(offer_id: str, offer: OfferRecord) -> HistoryRecord:
+    return HistoryRecord(
+        checked_at=date.today(),
+        offer_id=offer_id,
+        company=offer.company,
+        title=offer.title,
+        link=offer.link,
+        result="Pominięta jako duplikat",
+        checked_scope="Dodanie oferty",
+        note="Nie dodano nowego rekordu, ponieważ ten link już istnieje w arkuszu Oferty.",
+        source=offer.source or offer.link,
+    )
+
+
+def _normalize_workbook_sheets(workbook) -> None:
+    if CV_MATCH_SHEET in workbook.sheetnames:
+        return
+    if LEGACY_CV_MATCH_SHEET in workbook.sheetnames:
+        workbook[LEGACY_CV_MATCH_SHEET].title = CV_MATCH_SHEET
+
+
 def _get_sheet(workbook, sheet_name: str) -> Worksheet:
-    wanted_name = _text_key(sheet_name)
+    wanted_names = [sheet_name, *SHEET_ALIASES.get(sheet_name, [])]
+    wanted_keys = {_text_key(name) for name in wanted_names}
     for existing_name in workbook.sheetnames:
-        if _text_key(existing_name) == wanted_name:
+        if _text_key(existing_name) in wanted_keys:
             return workbook[existing_name]
 
     raise KeyError(f"Nie znaleziono arkusza: {sheet_name}")
@@ -446,8 +866,145 @@ def _ensure_sheet_headers(sheet: Worksheet, headers: list[str]) -> None:
             target_cell.alignment = copy(source_cell.alignment)
             target_cell.number_format = source_cell.number_format
             target_cell.protection = copy(source_cell.protection)
+        for row in range(2, sheet.max_row + 1):
+            source_body_cell = sheet.cell(row=row, column=target_column - 1)
+            target_body_cell = sheet.cell(row=row, column=target_column)
+            if not source_body_cell.has_style:
+                continue
+            target_body_cell.font = copy(source_body_cell.font)
+            target_body_cell.fill = copy(source_body_cell.fill)
+            target_body_cell.border = copy(source_body_cell.border)
+            target_body_cell.alignment = copy(source_body_cell.alignment)
+            target_body_cell.number_format = source_body_cell.number_format
+            target_body_cell.protection = copy(source_body_cell.protection)
         existing_headers[header] = target_column
         existing_headers[_text_key(header)] = target_column
+
+
+def _backfill_offer_tracking_columns(
+    offers_sheet: Worksheet,
+    cv_match_sheet: Worksheet | None = None,
+    history_sheet: Worksheet | None = None,
+) -> None:
+    headers = _header_positions(offers_sheet)
+    technologies_by_offer = (
+        _cv_technologies_by_offer(cv_match_sheet) if cv_match_sheet is not None else {}
+    )
+    latest_actions = (
+        _latest_history_actions_by_offer(history_sheet)
+        if history_sheet is not None
+        else {}
+    )
+
+    for row in range(2, offers_sheet.max_row + 1):
+        offer_id = _cell_by_header(offers_sheet, row, headers, "ID")
+        link = _cell_by_header(offers_sheet, row, headers, "Link")
+        if not offer_id and not link:
+            continue
+
+        current_score = _cell_by_header(offers_sheet, row, headers, "Match Score")
+        parsed_current_score = _parse_match_score(current_score)
+        legacy_score = _parse_match_score(
+            _cell_by_header(offers_sheet, row, headers, "Dopasowanie do CV")
+        )
+        if parsed_current_score is not None:
+            _set_cell_by_header(
+                offers_sheet, row, headers, "Match Score", parsed_current_score
+            )
+        elif legacy_score is not None:
+            _set_cell_by_header(offers_sheet, row, headers, "Match Score", legacy_score)
+
+        current_priority = _cell_by_header(offers_sheet, row, headers, "Priority")
+        legacy_priority = _cell_by_header(offers_sheet, row, headers, "Priorytet")
+        normalized_priority = _normalize_priority(current_priority) or _normalize_priority(
+            legacy_priority
+        )
+        if normalized_priority:
+            _set_cell_by_header(offers_sheet, row, headers, "Priority", normalized_priority)
+
+        if link:
+            _set_cell_by_header(offers_sheet, row, headers, "Portal", _detect_portal(str(link)))
+
+        current_action = _cell_by_header(offers_sheet, row, headers, "Ostatnia akcja")
+        latest_action = latest_actions.get(str(offer_id)) if offer_id else None
+        if _is_empty_value(current_action):
+            _set_cell_by_header(
+                offers_sheet, row, headers, "Ostatnia akcja", latest_action or "Dodano"
+            )
+        elif current_action == "Dodano" and latest_action not in {None, "Dodano"}:
+            _set_cell_by_header(
+                offers_sheet, row, headers, "Ostatnia akcja", latest_action
+            )
+
+        current_technologies = _cell_by_header(offers_sheet, row, headers, "Technologie")
+        normalized_technologies = _technology_text(current_technologies)
+        if normalized_technologies:
+            _set_cell_by_header(
+                offers_sheet, row, headers, "Technologie", normalized_technologies
+            )
+        elif _is_empty_value(current_technologies) and offer_id:
+            technologies = technologies_by_offer.get(str(offer_id), "")
+            if technologies:
+                _set_cell_by_header(offers_sheet, row, headers, "Technologie", technologies)
+
+
+def _cv_technologies_by_offer(sheet: Worksheet) -> dict[str, str]:
+    headers = _header_positions(sheet)
+    technologies: dict[str, list[str]] = {}
+
+    for row in range(2, sheet.max_row + 1):
+        offer_id = _cell_by_header(sheet, row, headers, "ID oferty")
+        if not offer_id:
+            continue
+
+        values = [
+            _cell_by_header(sheet, row, headers, "Wymaganie z oferty"),
+            _cell_by_header(sheet, row, headers, "Dowód / skill"),
+            _cell_by_header(sheet, row, headers, "Brak / do nauki"),
+        ]
+        for value in values:
+            for technology in _split_technology_values(value):
+                technologies.setdefault(str(offer_id), []).append(technology)
+
+    return {
+        offer_id: "; ".join(_dedupe_case_insensitive(values))
+        for offer_id, values in technologies.items()
+    }
+
+
+def _latest_history_actions_by_offer(sheet: Worksheet) -> dict[str, str]:
+    headers = _header_positions(sheet)
+    id_column = _column_for_header(headers, "ID oferty")
+    result_column = _column_for_header(headers, "Wynik")
+    if id_column is None or result_column is None:
+        return {}
+
+    actions: dict[str, str] = {}
+    for row in range(2, sheet.max_row + 1):
+        offer_id = sheet.cell(row=row, column=id_column).value
+        result = sheet.cell(row=row, column=result_column).value
+        if not offer_id or not result:
+            continue
+        action = _history_action_from_result(result, None)
+        if action:
+            actions[str(offer_id)] = action
+    return actions
+
+
+def _resize_known_table(sheet: Worksheet) -> None:
+    table_name = None
+    sheet_key = _text_key(sheet.title)
+    for known_sheet_name, known_table_name in TABLE_NAMES.items():
+        if _text_key(known_sheet_name) == sheet_key:
+            table_name = known_table_name
+            break
+
+    if not table_name or table_name not in sheet.tables:
+        return
+
+    last_column = get_column_letter(sheet.max_column)
+    last_row = max(sheet.max_row, 200)
+    sheet.tables[table_name].ref = f"A1:{last_column}{last_row}"
 
 
 def _normalize_sheet_values(sheet: Worksheet) -> None:
@@ -455,6 +1012,64 @@ def _normalize_sheet_values(sheet: Worksheet) -> None:
         for cell in row:
             if isinstance(cell.value, str) and cell.value in VALUE_RENAMES:
                 cell.value = VALUE_RENAMES[cell.value]
+
+
+def _normalize_history_actions(sheet: Worksheet) -> None:
+    headers = _header_positions(sheet)
+    result_column = _column_for_header(headers, "Wynik")
+    scope_column = _column_for_header(headers, "Co sprawdzono")
+    note_column = _column_for_header(headers, "Notatka")
+    if result_column is None:
+        return
+
+    for row in range(2, sheet.max_row + 1):
+        result = sheet.cell(row=row, column=result_column).value
+        scope = (
+            sheet.cell(row=row, column=scope_column).value
+            if scope_column is not None
+            else None
+        )
+        normalized_result = _history_action_from_result(result, scope)
+        if not normalized_result:
+            continue
+
+        if result != normalized_result:
+            sheet.cell(row=row, column=result_column, value=normalized_result)
+            if note_column is not None and result:
+                note = sheet.cell(row=row, column=note_column).value
+                sheet.cell(
+                    row=row,
+                    column=note_column,
+                    value=_append_migration_note(note, f"Poprzedni wynik: {result}."),
+                )
+
+        if scope == "Ręczny wpis testowy" and scope_column is not None:
+            sheet.cell(row=row, column=scope_column, value="Dodanie oferty")
+
+
+def _history_action_from_result(result: object, scope: object) -> str | None:
+    if _is_empty_value(result):
+        return None
+
+    text = str(result).strip()
+    if text in {"Dodano", "Zaktualizowano", "Niedostępna", "Pominięta jako duplikat"}:
+        return text
+    if scope == "Ręczny wpis testowy":
+        return "Dodano"
+    if text == "Zamknięta":
+        return "Niedostępna"
+    if text in {"Dostępna", "Niepewna"}:
+        return "Zaktualizowano"
+    return None
+
+
+def _append_migration_note(note: object, migration_note: str) -> str:
+    if not note:
+        return migration_note
+    note_text = str(note)
+    if migration_note in note_text:
+        return note_text
+    return f"{note_text} {migration_note}"
 
 
 def _normalize_dashboard_sheet(sheet: Worksheet) -> None:
@@ -472,6 +1087,7 @@ def _normalize_dashboard_sheet(sheet: Worksheet) -> None:
 
 
 def _refresh_dashboard_actions(dashboard_sheet: Worksheet, offers_sheet: Worksheet) -> None:
+    _refresh_dashboard_formulas(dashboard_sheet, offers_sheet)
     action_rows = _dashboard_action_rows(offers_sheet)
     last_action_row = max(dashboard_sheet.max_row, 4 + len(action_rows), 9)
 
@@ -519,6 +1135,38 @@ def _dashboard_action_rows(offers_sheet: Worksheet) -> list[tuple[object, ...]]:
 
     actions.sort(key=lambda item: item[0], reverse=True)
     return [action for _, action in actions]
+
+
+def _refresh_dashboard_formulas(
+    dashboard_sheet: Worksheet, offers_sheet: Worksheet
+) -> None:
+    headers = _header_positions(offers_sheet)
+    id_column = _column_letter_for_header(headers, "ID")
+    availability_column = _column_letter_for_header(headers, "Dostępność")
+    status_column = _column_letter_for_header(headers, "Status")
+    priority_column = _column_letter_for_header(headers, "Priority")
+    days_column = _column_letter_for_header(headers, "Dni od sprawdzenia")
+
+    if id_column:
+        dashboard_sheet["B4"] = f"=COUNTA(Oferty!{id_column}2:{id_column}200)"
+    if availability_column:
+        dashboard_sheet["B5"] = (
+            f'=COUNTIF(Oferty!{availability_column}2:{availability_column}200,'
+            '"Dostępna")'
+        )
+    if status_column:
+        dashboard_sheet["B6"] = (
+            f'=COUNTIF(Oferty!{status_column}2:{status_column}200,"Do analizy")'
+        )
+        dashboard_sheet["B7"] = (
+            f'=COUNTIF(Oferty!{status_column}2:{status_column}200,"Aplikowano")'
+        )
+    if priority_column:
+        dashboard_sheet["B8"] = (
+            f'=COUNTIF(Oferty!{priority_column}2:{priority_column}200,"HIGH")'
+        )
+    if days_column:
+        dashboard_sheet["B9"] = f'=COUNTIF(Oferty!{days_column}2:{days_column}200,">14")'
 
 
 def _cell_by_header(
@@ -593,6 +1241,170 @@ def _column_for_header(headers: dict[str, int], header: str) -> int | None:
             return alias_column
 
     return None
+
+
+def _column_letter_for_header(headers: dict[str, int], header: str) -> str | None:
+    column = _column_for_header(headers, header)
+    if column is None:
+        return None
+    return get_column_letter(column)
+
+
+def _find_offer_id_by_link(sheet: Worksheet, link: str) -> str | None:
+    headers = _header_positions(sheet)
+    id_column = _column_for_header(headers, "ID")
+    link_column = _column_for_header(headers, "Link")
+    if id_column is None or link_column is None:
+        return None
+
+    normalized_link = _normalize_link(link)
+    if not normalized_link:
+        return None
+
+    for row in range(2, sheet.max_row + 1):
+        existing_link = sheet.cell(row=row, column=link_column).value
+        if _normalize_link(existing_link) != normalized_link:
+            continue
+
+        offer_id = sheet.cell(row=row, column=id_column).value
+        return str(offer_id) if offer_id else None
+
+    return None
+
+
+def _normalize_link(link: object) -> str:
+    if link is None:
+        return ""
+    return str(link).strip().rstrip("/").lower()
+
+
+def _detect_portal(url: str) -> str:
+    try:
+        parsed_url = urlparse(url if "://" in url else f"https://{url}")
+    except ValueError:
+        return "Unknown"
+
+    host = parsed_url.netloc.lower().removeprefix("www.")
+    full_url = f"{host}{parsed_url.path}".lower()
+    if "justjoin.it" in host or "justjoinit" in host:
+        return "Just Join IT"
+    if "nofluffjobs.com" in host:
+        return "No Fluff Jobs"
+    if "linkedin.com" in host:
+        return "LinkedIn"
+    if "testdevjobs" in full_url:
+        return "TestDevJobs"
+    return "Unknown"
+
+
+def _normalize_priority(value: object) -> str | None:
+    if _is_empty_value(value):
+        return None
+
+    priority_map = {
+        "high": "HIGH",
+        "wysoki": "HIGH",
+        "medium": "MEDIUM",
+        "sredni": "MEDIUM",
+        "low": "LOW",
+        "niski": "LOW",
+    }
+    return priority_map.get(_text_key(str(value)))
+
+
+def _parse_match_score(value: object) -> int | None:
+    if _is_empty_value(value):
+        return None
+
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(round(value))
+
+    match = re.search(r"\d+(?:[,.]\d+)?", str(value))
+    if not match:
+        return None
+
+    return int(round(float(match.group(0).replace(",", "."))))
+
+
+def _technology_text(value: object) -> str | None:
+    technologies = _split_technology_values(value)
+    if not technologies:
+        return None
+    return "; ".join(_dedupe_case_insensitive(technologies))
+
+
+def _technologies_from_match_result(match_result) -> str | None:
+    technologies: list[str] = []
+    for requirement in match_result.requirements:
+        technologies.extend(
+            _split_technology_values(requirement.evidence)
+            + _split_technology_values(requirement.missing_skill)
+            + _split_technology_values(requirement.requirement)
+        )
+    return _technology_text("; ".join(technologies))
+
+
+def _split_technology_values(value: object) -> list[str]:
+    if _is_empty_value(value):
+        return []
+
+    ignored_values = {
+        "brak",
+        "brak dopasowania w profilu",
+        "do recznej weryfikacji",
+        "do ręcznej weryfikacji",
+        "nie dotyczy",
+        "wymaga nauki lub dopisania do profilu",
+    }
+    values = re.split(r"[;\n|]+", str(value))
+    cleaned_values = []
+    for item in values:
+        cleaned_item = re.sub(r"\s+", " ", item).strip(" .,")
+        if not cleaned_item or _text_key(cleaned_item) in ignored_values:
+            continue
+        if cleaned_item in {"-", "_"}:
+            continue
+        recognized_technologies = _recognized_technologies(cleaned_item)
+        if recognized_technologies:
+            cleaned_values.extend(recognized_technologies)
+            continue
+        if len(cleaned_item) <= 40:
+            cleaned_values.append(cleaned_item)
+    return cleaned_values
+
+
+def _recognized_technologies(text: str) -> list[str]:
+    matches: list[str] = []
+    for technology, aliases in TECHNOLOGY_ALIASES.items():
+        if any(_contains_technology_alias(text, alias) for alias in aliases):
+            matches.append(technology)
+    return matches
+
+
+def _contains_technology_alias(text: str, alias: str) -> bool:
+    pattern = rf"(?<![a-z0-9#+]){re.escape(alias.lower())}(?![a-z0-9#+])"
+    return re.search(pattern, text.lower()) is not None
+
+
+def _dedupe_case_insensitive(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        key = _text_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _is_empty_value(value: object) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text in {"", "TBD", UNKNOWN_VALUE, "Unknown"}
 
 
 def _salary_values(salary: SalaryInfo) -> dict[str, object]:
