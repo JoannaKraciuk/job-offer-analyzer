@@ -1,0 +1,1 @@
+"""Job offer analyzer package."""

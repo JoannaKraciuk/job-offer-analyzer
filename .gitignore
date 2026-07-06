@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local IDE settings
+.idea/
+.vscode/
+
+# Logs and local runtime files
+logs/
+*.log
+
+# Secrets and local config
+.env
+.env.*
+
+# Private/local Excel workbooks
+data/*.xlsx
+data/backups/
+
+# Keep the data directory structure without committing private data
+!data/.gitkeep
+!data/README.md
