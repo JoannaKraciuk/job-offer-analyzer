@@ -27,6 +27,7 @@ cv.md
 
 # Private/local Excel workbooks
 data/*.xlsx
+data/*.xlsm
 data/backups/
 
 # Keep the data directory structure without committing private data

@@ -106,6 +106,8 @@ Important reporting columns in `Oferty`:
 
 ## Screenshots
 
+Screenshots use demo data. Real job application data is stored locally and is not included in this repository.
+
 ### Main Application Window
 
 ![Main application window](docs/screenshots/main-application.png)
