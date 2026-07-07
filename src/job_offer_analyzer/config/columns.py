@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+
+COLUMN_MAPPING = {
+    "offer_id": "ID",
+    "offer_ref_id": "ID oferty",
+    "date_added": "Data dodania",
+    "checked_at": "Data sprawdzenia",
+    "company": "Firma",
+    "job_title": "Stanowisko",
+    "url": "Link",
+    "last_checked": "Ostatnio sprawdzono",
+    "availability": "Dostępność",
+    "status": "Status",
+    "cv_match": "Dopasowanie do CV",
+    "priority": "Priorytet",
+    "priority_code": "Kod priorytetu",
+    "priority_code_legacy": "Priority",
+    "work_mode": "Tryb",
+    "location": "Lokalizacja",
+    "contract_type": "Forma umowy",
+    "rate_expectations": "Stawka / oczekiwania (PLN)",
+    "rate_expectations_legacy": "Stawka / oczekiwania",
+    "rate_expectations_usd_legacy": "Stawka / oczekiwania (USD)",
+    "seniority": "Poziom",
+    "days_since_check": "Dni od sprawdzenia",
+    "must_have_summary": "Must-have skrót",
+    "nice_to_have_summary": "Nice-to-have skrót",
+    "risks_notes": "Ryzyka / uwagi",
+    "next_step": "Następny krok",
+    "source": "Źródło",
+    "salary": "Stawka / oczekiwania (PLN)",
+    "salary_source": "Stawka źródłowa",
+    "currency": "Waluta",
+    "salary_min": "Stawka min",
+    "salary_max": "Stawka max",
+    "salary_period": "Okres stawki",
+    "tax_type": "Brutto/netto",
+    "exchange_rate": "Kurs waluty",
+    "exchange_rate_date": "Data kursu",
+    "pln_min_monthly": "PLN min miesięcznie",
+    "pln_max_monthly": "PLN max miesięcznie",
+    "pln_min_hourly": "PLN min godzinowo",
+    "pln_max_hourly": "PLN max godzinowo",
+    "conversion_assumptions": "Założenia przeliczenia",
+    "missing_skills": "Braki / do nauki",
+    "match_score": "Wynik dopasowania",
+    "match_score_legacy": "Match Score",
+    "technologies": "Technologie",
+    "portal": "Portal",
+    "last_action": "Ostatnia akcja",
+    "result": "Wynik",
+    "checked_scope": "Co sprawdzono",
+    "note": "Notatka",
+    "application_question": "Pytanie z formularza",
+    "required": "Wymagane?",
+    "answer_draft": "Szkic odpowiedzi",
+    "answer_status": "Status odpowiedzi",
+    "comments": "Uwagi",
+    "category": "Kategoria",
+    "offer_requirement": "Wymaganie z oferty",
+    "in_profile": "Czy mam w profilu",
+    "evidence_skill": "Dowód / skill",
+    "match_strength": "Siła dopasowania",
+    "missing_to_learn": "Brak / do nauki",
+    "importance": "Ważność",
+    "comment": "Komentarz",
+    "in_cv_legacy": "Czy mam w CV?",
+    "cv_evidence_legacy": "Dowód z CV / projekt",
+    "cv_improvement_legacy": "Co dopisać / poprawić w CV",
+}
+
+
+def get_column_name(key: str) -> str:
+    if key not in COLUMN_MAPPING:
+        raise KeyError(f"Unknown column key: {key}")
+    return COLUMN_MAPPING[key]
+
+
+def col(key: str) -> str:
+    return get_column_name(key)
