@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.filters import AutoFilter
+from openpyxl.worksheet.table import TableColumn
 from openpyxl.worksheet.worksheet import Worksheet
 
 from job_offer_analyzer.config.columns import col
@@ -55,7 +57,6 @@ OFFER_HEADER_RENAMES = {
     "Dostepnosc": col("availability"),
     "Forma": col("contract_type"),
     col("rate_expectations_legacy"): col("rate_expectations"),
-    col("match_score_legacy"): col("match_score"),
     "Must-have skrot": col("must_have_summary"),
     "Nice-to-have skrot": col("nice_to_have_summary"),
     "Nastepny krok": col("next_step"),
@@ -864,14 +865,13 @@ def _header_positions(sheet: Worksheet) -> dict[str, int]:
 
 
 def _normalize_offer_headers(sheet: Worksheet) -> None:
-    if _has_exact_header(sheet, col("priority_code_legacy")):
-        target_header = (
-            col("priority_code")
-            if _has_exact_header(sheet, col("priority"))
-            else col("priority")
-        )
-        _rename_exact_header(sheet, col("priority_code_legacy"), target_header)
-
+    _migrate_legacy_column(
+        sheet,
+        source_header=col("match_score_legacy"),
+        target_header=col("match_score"),
+        transform=_parse_match_score,
+    )
+    _migrate_legacy_priority_column(sheet)
     _normalize_sheet_headers(sheet, OFFER_HEADER_RENAMES)
 
 
@@ -886,6 +886,79 @@ def _rename_exact_header(sheet: Worksheet, source_header: str, target_header: st
     for column in range(1, sheet.max_column + 1):
         if sheet.cell(row=1, column=column).value == source_header:
             sheet.cell(row=1, column=column, value=target_header)
+
+
+def _migrate_legacy_column(
+    sheet: Worksheet,
+    source_header: str,
+    target_header: str,
+    transform=None,
+) -> None:
+    source_columns = _exact_header_columns(sheet, source_header)
+    if not source_columns:
+        return
+
+    target_column = _exact_header_columns(sheet, target_header)
+    if not target_column:
+        sheet.cell(row=1, column=source_columns[0], value=target_header)
+        source_columns = source_columns[1:]
+        target_column = _exact_header_columns(sheet, target_header)
+
+    if target_column:
+        target = target_column[0]
+        for source in source_columns:
+            _copy_column_values_if_missing(sheet, source, target, transform=transform)
+
+    for source in sorted(source_columns, reverse=True):
+        sheet.delete_cols(source, 1)
+
+
+def _migrate_legacy_priority_column(sheet: Worksheet) -> None:
+    source_columns = _exact_header_columns(sheet, col("priority_code_legacy"))
+    if not source_columns:
+        return
+
+    has_visible_priority = bool(_exact_header_columns(sheet, col("priority")))
+    target_header = col("priority_code") if has_visible_priority else col("priority")
+    target_columns = _exact_header_columns(sheet, target_header)
+
+    if not target_columns:
+        sheet.cell(row=1, column=source_columns[0], value=target_header)
+        source_columns = source_columns[1:]
+        target_columns = _exact_header_columns(sheet, target_header)
+
+    if target_columns:
+        target = target_columns[0]
+        for source in source_columns:
+            _copy_column_values_if_missing(sheet, source, target, transform=_priority_code)
+
+    for source in sorted(source_columns, reverse=True):
+        sheet.delete_cols(source, 1)
+
+
+def _exact_header_columns(sheet: Worksheet, header: str) -> list[int]:
+    return [
+        column
+        for column in range(1, sheet.max_column + 1)
+        if sheet.cell(row=1, column=column).value == header
+    ]
+
+
+def _copy_column_values_if_missing(
+    sheet: Worksheet,
+    source_column: int,
+    target_column: int,
+    transform=None,
+) -> None:
+    for row in range(2, sheet.max_row + 1):
+        source_value = sheet.cell(row=row, column=source_column).value
+        target_cell = sheet.cell(row=row, column=target_column)
+        if _is_empty_value(source_value) or not _is_empty_value(target_cell.value):
+            continue
+
+        value = transform(source_value) if transform is not None else source_value
+        if value is not None:
+            target_cell.value = value
 
 
 def _normalize_sheet_headers(sheet: Worksheet, renames: dict[str, str]) -> None:
@@ -1058,9 +1131,34 @@ def _resize_known_table(sheet: Worksheet) -> None:
     if not table_name or table_name not in sheet.tables:
         return
 
-    last_column = get_column_letter(sheet.max_column)
+    last_header_column = _last_header_column(sheet)
+    if last_header_column == 0:
+        return
+
+    last_column = get_column_letter(last_header_column)
     last_row = max(sheet.max_row, 200)
-    sheet.tables[table_name].ref = f"A1:{last_column}{last_row}"
+    table_ref = f"A1:{last_column}{last_row}"
+    table = sheet.tables[table_name]
+    table.ref = table_ref
+    table.autoFilter = AutoFilter(ref=table_ref)
+    table.tableColumns = [
+        TableColumn(id=column, name=_table_column_name(sheet, column))
+        for column in range(1, last_header_column + 1)
+    ]
+
+
+def _last_header_column(sheet: Worksheet) -> int:
+    for column in range(sheet.max_column, 0, -1):
+        if sheet.cell(row=1, column=column).value not in (None, ""):
+            return column
+    return 0
+
+
+def _table_column_name(sheet: Worksheet, column: int) -> str:
+    value = sheet.cell(row=1, column=column).value
+    if value in (None, ""):
+        return f"Column{column}"
+    return str(value)
 
 
 def _normalize_sheet_values(sheet: Worksheet) -> None:
