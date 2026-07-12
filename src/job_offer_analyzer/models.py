@@ -148,6 +148,7 @@ class CvMatchRefreshRow:
     title: str
     link: str
     match_score: int
+    confidence_score: int
     priority: str
     matched_skills: list[str]
     missing_skills: list[str]
@@ -161,6 +162,15 @@ class CvMatchRefreshSummary:
     updated_count: int
     skipped_count: int
     failed_count: int
+    results: list[CvMatchRefreshRow]
+
+
+@dataclass(frozen=True)
+class CvMatchRecalculationSummary:
+    checked_count: int
+    updated_count: int
+    skipped_count: int
+    manual_override_count: int
     results: list[CvMatchRefreshRow]
 
 

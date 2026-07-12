@@ -11,6 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from job_offer_analyzer.excel_writer import (
     append_offer_to_workbook,
+    refresh_cv_matches_for_existing_offers,
     refresh_cv_matches_in_workbook,
     refresh_offer_availability_in_workbook,
     refresh_offer_salaries_in_workbook,
@@ -56,6 +57,7 @@ FIELD_DEFAULTS = {
     "next_step": "Pobrać treść oferty i wykonać analizę pod CV",
     "source_preview": "",
     "fetch_message": "",
+    "cv_recalculation_mode": "Tylko brakujące wyniki",
 }
 
 AVAILABILITY_OPTIONS = ["Dostępna", "Do sprawdzenia", "Niepewna", "Zamknięta"]
@@ -66,6 +68,11 @@ SENIORITY_OPTIONS = [UNKNOWN_VALUE, "Intern", "Junior", "Mid", "Senior", "Experi
 SALARY_CURRENCY_OPTIONS = [UNKNOWN_VALUE, "PLN", "EUR", "USD"]
 SALARY_PERIOD_OPTIONS = [UNKNOWN_VALUE, "godzinowo", "miesięcznie", "rocznie"]
 SALARY_TAX_OPTIONS = [UNKNOWN_VALUE, "netto", "brutto"]
+CV_RECALCULATION_MODE_OPTIONS = ["Tylko brakujące wyniki", "Wszystkie oferty"]
+CV_RECALCULATION_MODES = {
+    "Tylko brakujące wyniki": "only_missing",
+    "Wszystkie oferty": "all",
+}
 
 
 def main() -> None:
@@ -97,6 +104,20 @@ def main() -> None:
         st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
         cv_match_clicked = st.button("Analizuj pod CV", use_container_width=True)
 
+    recalc_mode_col, recalc_button_col = st.columns([2.2, 1.2])
+    with recalc_mode_col:
+        st.selectbox(
+            "Tryb przeliczania CV",
+            CV_RECALCULATION_MODE_OPTIONS,
+            key="cv_recalculation_mode",
+        )
+    with recalc_button_col:
+        st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+        cv_recalculate_clicked = st.button(
+            "Przelicz dopasowanie CV",
+            use_container_width=True,
+        )
+
     if fetch_clicked:
         _fetch_link_into_form()
 
@@ -108,6 +129,9 @@ def main() -> None:
 
     if cv_match_clicked:
         _refresh_cv_matches()
+
+    if cv_recalculate_clicked:
+        _recalculate_cv_matches()
 
     if st.session_state["fetch_message"]:
         st.success(st.session_state["fetch_message"])
@@ -281,6 +305,7 @@ def _ensure_session_defaults() -> None:
     _ensure_allowed_value("salary_currency", SALARY_CURRENCY_OPTIONS)
     _ensure_allowed_value("salary_period", SALARY_PERIOD_OPTIONS)
     _ensure_allowed_value("salary_tax_type", SALARY_TAX_OPTIONS)
+    _ensure_allowed_value("cv_recalculation_mode", CV_RECALCULATION_MODE_OPTIONS)
 
 
 def _ensure_allowed_value(key: str, allowed_values: list[str]) -> None:
@@ -414,6 +439,56 @@ def _refresh_cv_matches() -> None:
                     "Firma": result.company,
                     "Stanowisko": result.title,
                     "Wynik": f"{result.match_score}%",
+                    "Confidence": f"{result.confidence_score}%",
+                    "Priorytet": result.priority,
+                    "Dopasowane": "; ".join(result.matched_skills),
+                    "Braki": "; ".join(result.missing_skills),
+                    "Notatka": result.note,
+                }
+                for result in summary.results
+            ]
+        )
+
+
+def _recalculate_cv_matches() -> None:
+    mode = CV_RECALCULATION_MODES[st.session_state["cv_recalculation_mode"]]
+    try:
+        with st.spinner("Przeliczam dopasowanie CV..."):
+            summary = refresh_cv_matches_for_existing_offers(
+                WORKBOOK_PATH,
+                CV_PROFILE_PATH,
+                mode=mode,
+            )
+    except CvProfileNotFoundError as exc:
+        st.error(str(exc))
+        return
+    except CvProfileError as exc:
+        st.error(f"Profil CV ma nieprawidłowy format: {exc}")
+        return
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Nie udało się przeliczyć dopasowania CV: {exc}")
+        return
+
+    st.success(
+        "Sprawdzono "
+        f"{summary.checked_count} ofert. "
+        f"Zaktualizowano {summary.updated_count}, "
+        f"pominięto {summary.skipped_count}, "
+        f"ręczna korekta: {summary.manual_override_count}."
+    )
+
+    if summary.results:
+        _show_wrapped_results_table(
+            [
+                {
+                    "ID": result.offer_id,
+                    "Firma": result.company,
+                    "Stanowisko": result.title,
+                    "Wynik": f"{result.match_score}%",
+                    "Confidence": f"{result.confidence_score}%",
                     "Priorytet": result.priority,
                     "Dopasowane": "; ".join(result.matched_skills),
                     "Braki": "; ".join(result.missing_skills),

@@ -62,10 +62,11 @@ Main application areas:
 - maintain action and availability history
 - refresh the Excel dashboard
 - run basic non-generative CV matching
+- recalculate CV match scores for existing offers with the current rule-based scoring logic
+- preserve manual CV score overrides while refreshing automatic match data
 
 ### Planned Development
 
-- improved CV matching
 - AI-based job offer analysis
 - market trends dashboard
 - report export
@@ -80,7 +81,8 @@ Main application areas:
 - ✅ Update existing offers
 - ✅ Dashboard
 - ✅ Change history
-- 🔄 CV analysis
+- ✅ Rule-based CV analysis
+- ✅ CV match recalculation for existing offers
 - 🔄 AI insights
 - 🔄 Market trends analysis
 - 🔄 Report export
@@ -98,11 +100,30 @@ Main worksheets:
 Important reporting columns in `Oferty`:
 
 - `Wynik dopasowania` - numeric match score, for example `82`
+- `Confidence Score` - confidence level for the CV match analysis, based on how many useful requirements were detected
+- `Manual Match Score` - optional manual override for the final match score
+- `Manual Score Reason` - optional note explaining why the manual score was applied
 - `Priorytet` - user-facing priority: `Wysoki`, `Średni`, or `Niski`
 - `Kod priorytetu` - technical priority code: `HIGH`, `MEDIUM`, or `LOW`
 - `Technologie` - technologies separated with semicolons, for example `Python; Playwright; SQL; API`
 - `Portal` - detected source, for example `Just Join IT`, `No Fluff Jobs`, `LinkedIn`, `TestDevJobs`, or `Nieznany`
 - `Ostatnia akcja` - latest process action, for example `Dodano`, `Zaktualizowano`, `CV wysłane`, `HR`, `Techniczna`, `Oferta`, `Odrzucona`
+
+## CV Matching
+
+The CV matching module uses deterministic rules, not an LLM. It detects requirements from the offer text, groups them into categories, applies weights, and calculates two separate values:
+
+- `Wynik dopasowania` - skill match score after weighting, caps for low requirement counts, penalties, and optional manual override.
+- `Confidence Score` - confidence that the analysis is reliable, based mainly on the number and variety of detected requirements.
+
+Low-signal workflow tools such as Jira, Agile, and Git have limited impact on the final score. Core automation skills such as Playwright, Python, Pytest, test automation, and Page Object Model carry higher weight. The scoring also applies penalties for manual-only roles, missing core skills, niche domain tools not present in the profile, primary stack mismatch, and seniority that appears too high for the profile.
+
+Existing offers can be recalculated from the Streamlit UI with `Przelicz dopasowanie CV`. Two modes are available:
+
+- `Tylko brakujące wyniki` - recalculates only offers without `Wynik dopasowania` or `Confidence Score`.
+- `Wszystkie oferty` - recalculates all saved offers.
+
+Manual override columns are protected during recalculation. If `Manual Match Score` is filled in, it remains unchanged and is used as the final match score, while automatic fields such as confidence, technologies, missing skills, priority, and history are refreshed.
 
 ## Screenshots
 

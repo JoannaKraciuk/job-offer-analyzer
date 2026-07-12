@@ -17,6 +17,7 @@ from job_offer_analyzer.config.columns import col
 from job_offer_analyzer.models import (
     AvailabilityRefreshRow,
     AvailabilityRefreshSummary,
+    CvMatchRecalculationSummary,
     CvMatchRefreshRow,
     CvMatchRefreshSummary,
     HistoryRecord,
@@ -152,13 +153,18 @@ SALARY_HEADERS = [
 ]
 OFFER_TRACKING_HEADERS = [
     col("match_score"),
+    col("confidence_score"),
     col("priority"),
     col("priority_code"),
     col("technologies"),
     col("portal"),
     col("last_action"),
 ]
-OFFER_MATCH_HEADERS = [col("missing_skills")]
+OFFER_MATCH_HEADERS = [
+    col("missing_skills"),
+    col("manual_match_score"),
+    col("manual_score_reason"),
+]
 CV_MATCH_HEADERS = [col("url")]
 AUTO_MATCH_CATEGORY = "Automatyczne dopasowanie"
 TABLE_NAMES = {
@@ -445,6 +451,7 @@ def refresh_cv_matches_in_workbook(
     from services.cv_matcher import (
         load_candidate_profile,
         match_offer_to_profile,
+        priority_from_score,
     )
 
     workbook_path = Path(workbook_path)
@@ -517,61 +524,38 @@ def refresh_cv_matches_in_workbook(
             fetch_note = f"Nie pobrano strony, użyto danych z arkusza: {exc}"
 
         match_result = match_offer_to_profile(offer_text, profile)
-        _set_cell_by_header(
-            offers_sheet,
-            row,
-            offers_headers,
-            col("match_score"),
-            match_result.match_score,
+        manual_score = _clamp_match_score(
+            _parse_match_score(
+                _cell_by_header(offers_sheet, row, offers_headers, col("manual_match_score"))
+            )
         )
-        _set_cell_by_header(
-            offers_sheet,
-            row,
-            offers_headers,
-            col("priority_code"),
-            _priority_code(match_result.priority),
+        manual_reason = str(
+            _cell_by_header(offers_sheet, row, offers_headers, col("manual_score_reason"))
+            or ""
+        ).strip()
+        final_score = manual_score if manual_score is not None else match_result.match_score
+        final_priority = priority_from_score(final_score, match_result.confidence_score)
+        result_note = _cv_match_note(
+            match_result=match_result,
+            fetch_note=fetch_note,
+            manual_score=manual_score,
+            manual_reason=manual_reason,
         )
-        _set_cell_by_header(
-            offers_sheet,
-            row,
-            offers_headers,
-            col("technologies"),
-            _technologies_from_match_result(match_result),
-        )
-        _set_cell_by_header(offers_sheet, row, offers_headers, col("portal"), _detect_portal(link_text))
-        _set_cell_by_header(offers_sheet, row, offers_headers, col("last_action"), "Zaktualizowano")
-        _set_cell_by_header(
-            offers_sheet,
-            row,
-            offers_headers,
-            col("cv_match"),
-            f"{match_result.match_score}%",
-        )
-        _set_cell_by_header(
-            offers_sheet,
-            row,
-            offers_headers,
-            col("priority"),
-            _priority_label(match_result.priority),
-        )
-        _set_cell_by_header(
-            offers_sheet,
-            row,
-            offers_headers,
-            col("missing_skills"),
-            _missing_skills_text(match_result),
-        )
-
-        _clear_auto_cv_match_rows(cv_match_sheet, cv_headers, str(offer_id))
-        _append_cv_match_rows(
-            cv_match_sheet,
-            cv_headers,
+        _write_cv_match_result(
+            offers_sheet=offers_sheet,
+            offers_headers=offers_headers,
+            offers_row=row,
+            cv_match_sheet=cv_match_sheet,
+            cv_headers=cv_headers,
             offer_id=str(offer_id),
             company=company,
             title=title,
             link=link_text,
             match_result=match_result,
+            final_score=final_score,
+            final_priority=final_priority,
             fetch_note=fetch_note,
+            last_action="Zaktualizowano",
         )
 
         results.append(
@@ -580,12 +564,13 @@ def refresh_cv_matches_in_workbook(
                 company=company,
                 title=title,
                 link=link_text,
-                match_score=match_result.match_score,
-                priority=match_result.priority,
+                match_score=final_score,
+                confidence_score=match_result.confidence_score,
+                priority=final_priority,
                 matched_skills=match_result.matched_skills,
                 missing_skills=match_result.missing_skills,
                 updated=True,
-                note=match_result.short_reason if not fetch_note else f"{match_result.short_reason} {fetch_note}",
+                note=result_note,
             )
         )
 
@@ -597,6 +582,7 @@ def refresh_cv_matches_in_workbook(
                 title="",
                 link=normalized_selected_link,
                 match_score=0,
+                confidence_score=0,
                 priority="LOW",
                 matched_skills=[],
                 missing_skills=[],
@@ -615,6 +601,178 @@ def refresh_cv_matches_in_workbook(
         updated_count=sum(result.updated for result in results),
         skipped_count=0,
         failed_count=sum(not result.updated for result in results),
+        results=results,
+    )
+
+
+def refresh_cv_matches_for_existing_offers(
+    workbook_path: Path, profile_path: Path, mode: str = "only_missing"
+) -> CvMatchRecalculationSummary:
+    from job_offer_analyzer.fetch_offer import fetch_offer_from_url
+    from services.cv_matcher import (
+        load_candidate_profile,
+        match_offer_to_profile,
+        priority_from_score,
+    )
+
+    if mode not in {"only_missing", "all"}:
+        raise ValueError("mode must be 'only_missing' or 'all'")
+
+    workbook_path = Path(workbook_path)
+    if not workbook_path.exists():
+        raise FileNotFoundError(f"Workbook does not exist: {workbook_path}")
+    _ensure_workbook_writable(workbook_path)
+
+    profile = load_candidate_profile(Path(profile_path))
+    workbook = load_workbook(workbook_path)
+    _normalize_workbook_sheets(workbook)
+    offers_sheet = _get_sheet(workbook, OFFERS_SHEET)
+    cv_match_sheet = _get_sheet(workbook, CV_MATCH_SHEET)
+    history_sheet = _get_sheet(workbook, HISTORY_SHEET)
+    dashboard_sheet = _get_sheet(workbook, DASHBOARD_SHEET)
+
+    _normalize_offer_headers(offers_sheet)
+    _normalize_sheet_headers(cv_match_sheet, CV_MATCH_HEADER_RENAMES)
+    _normalize_sheet_headers(history_sheet, HISTORY_HEADER_RENAMES)
+    _ensure_sheet_headers(offers_sheet, SALARY_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_TRACKING_HEADERS)
+    _ensure_sheet_headers(offers_sheet, OFFER_MATCH_HEADERS)
+    _ensure_sheet_headers(cv_match_sheet, CV_MATCH_HEADERS)
+    _normalize_sheet_values(offers_sheet)
+    _normalize_sheet_values(history_sheet)
+    _normalize_history_actions(history_sheet)
+    _normalize_dashboard_sheet(dashboard_sheet)
+    _backfill_offer_tracking_columns(offers_sheet, cv_match_sheet)
+
+    offers_headers = _header_positions(offers_sheet)
+    cv_headers = _header_positions(cv_match_sheet)
+    results: list[CvMatchRefreshRow] = []
+    checked_count = 0
+    skipped_count = 0
+    manual_override_count = 0
+    today = date.today()
+
+    for row in range(2, offers_sheet.max_row + 1):
+        offer_id = _cell_by_header(offers_sheet, row, offers_headers, col("offer_id"))
+        link = _cell_by_header(offers_sheet, row, offers_headers, col("url"))
+        if not offer_id or not link:
+            continue
+
+        checked_count += 1
+        has_match_score = _has_cv_match_value(
+            _cell_by_header(offers_sheet, row, offers_headers, col("match_score"))
+        )
+        has_confidence_score = _has_cv_match_value(
+            _cell_by_header(offers_sheet, row, offers_headers, col("confidence_score"))
+        )
+        if mode == "only_missing" and has_match_score and has_confidence_score:
+            skipped_count += 1
+            continue
+
+        link_text = str(link).strip()
+        company = str(_cell_by_header(offers_sheet, row, offers_headers, col("company")) or "")
+        title = str(_cell_by_header(offers_sheet, row, offers_headers, col("job_title")) or "")
+        fallback_text = _offer_text_from_row(offers_sheet, row, offers_headers)
+        fetch_note = ""
+
+        try:
+            draft = fetch_offer_from_url(link_text)
+            offer_text = " ".join(
+                value
+                for value in [
+                    draft.title,
+                    draft.company,
+                    draft.must_have_summary,
+                    draft.nice_to_have_summary,
+                    draft.risks_notes,
+                    draft.source_text,
+                ]
+                if value and value != UNKNOWN_VALUE
+            )
+        except Exception as exc:
+            offer_text = fallback_text
+            fetch_note = f"Nie pobrano strony, użyto danych z arkusza: {exc}"
+
+        match_result = match_offer_to_profile(offer_text, profile)
+        manual_score = _clamp_match_score(
+            _parse_match_score(
+                _cell_by_header(offers_sheet, row, offers_headers, col("manual_match_score"))
+            )
+        )
+        manual_reason = str(
+            _cell_by_header(offers_sheet, row, offers_headers, col("manual_score_reason"))
+            or ""
+        ).strip()
+        if manual_score is not None:
+            manual_override_count += 1
+
+        final_score = manual_score if manual_score is not None else match_result.match_score
+        final_priority = priority_from_score(final_score, match_result.confidence_score)
+        result_note = _cv_match_note(
+            match_result=match_result,
+            fetch_note=fetch_note,
+            manual_score=manual_score,
+            manual_reason=manual_reason,
+        )
+
+        _write_cv_match_result(
+            offers_sheet=offers_sheet,
+            offers_headers=offers_headers,
+            offers_row=row,
+            cv_match_sheet=cv_match_sheet,
+            cv_headers=cv_headers,
+            offer_id=str(offer_id),
+            company=company,
+            title=title,
+            link=link_text,
+            match_result=match_result,
+            final_score=final_score,
+            final_priority=final_priority,
+            fetch_note=fetch_note,
+            last_action="Przeliczono dopasowanie CV",
+        )
+        _append_history_row(
+            history_sheet,
+            HistoryRecord(
+                checked_at=today,
+                offer_id=str(offer_id),
+                company=company,
+                title=title,
+                link=link_text,
+                result="Przeliczono dopasowanie CV",
+                checked_scope="Recalculation CV match",
+                note="Ponownie przeliczono dopasowanie CV aktualnym algorytmem.",
+                source=link_text,
+            ),
+        )
+
+        results.append(
+            CvMatchRefreshRow(
+                offer_id=str(offer_id),
+                company=company,
+                title=title,
+                link=link_text,
+                match_score=final_score,
+                confidence_score=match_result.confidence_score,
+                priority=final_priority,
+                matched_skills=match_result.matched_skills,
+                missing_skills=match_result.missing_skills,
+                updated=True,
+                note=result_note,
+            )
+        )
+
+    _refresh_dashboard_actions(dashboard_sheet, offers_sheet)
+    _resize_known_table(offers_sheet)
+    _resize_known_table(cv_match_sheet)
+    _resize_known_table(history_sheet)
+    workbook.save(workbook_path)
+
+    return CvMatchRecalculationSummary(
+        checked_count=checked_count,
+        updated_count=len(results),
+        skipped_count=skipped_count,
+        manual_override_count=manual_override_count,
         results=results,
     )
 
@@ -751,10 +909,109 @@ def _has_cv_match_value(value: object) -> bool:
     return text not in {"", "TBD", UNKNOWN_VALUE}
 
 
+def _cv_match_note(
+    match_result,
+    fetch_note: str,
+    manual_score: int | None,
+    manual_reason: str,
+) -> str:
+    note = match_result.short_reason
+    if manual_score is not None:
+        note = f"{note} Ręczna korekta Match Score: {manual_score}%."
+        if manual_reason:
+            note = f"{note} Powód: {manual_reason}."
+    if fetch_note:
+        note = f"{note} {fetch_note}"
+    return note
+
+
 def _missing_skills_text(match_result) -> str:
     if not match_result.missing_skills:
         return "Brak wykrytych braków"
     return "; ".join(match_result.missing_skills)
+
+
+def _write_cv_match_result(
+    offers_sheet: Worksheet,
+    offers_headers: dict[str, int],
+    offers_row: int,
+    cv_match_sheet: Worksheet,
+    cv_headers: dict[str, int],
+    offer_id: str,
+    company: str,
+    title: str,
+    link: str,
+    match_result,
+    final_score: int,
+    final_priority: str,
+    fetch_note: str,
+    last_action: str,
+) -> None:
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("match_score"),
+        final_score,
+    )
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("confidence_score"),
+        match_result.confidence_score,
+    )
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("priority_code"),
+        _priority_code(final_priority),
+    )
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("technologies"),
+        _technologies_from_match_result(match_result),
+    )
+    _set_cell_by_header(offers_sheet, offers_row, offers_headers, col("portal"), _detect_portal(link))
+    _set_cell_by_header(offers_sheet, offers_row, offers_headers, col("last_action"), last_action)
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("cv_match"),
+        f"{final_score}%",
+    )
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("priority"),
+        _priority_label(final_priority),
+    )
+    _set_cell_by_header(
+        offers_sheet,
+        offers_row,
+        offers_headers,
+        col("missing_skills"),
+        _missing_skills_text(match_result),
+    )
+
+    _clear_auto_cv_match_rows(cv_match_sheet, cv_headers, offer_id)
+    _append_cv_match_rows(
+        cv_match_sheet,
+        cv_headers,
+        offer_id=offer_id,
+        company=company,
+        title=title,
+        link=link,
+        match_result=match_result,
+        final_score=final_score,
+        final_priority=final_priority,
+        fetch_note=fetch_note,
+    )
 
 
 def _clear_auto_cv_match_rows(
@@ -782,6 +1039,8 @@ def _append_cv_match_rows(
     title: str,
     link: str,
     match_result,
+    final_score: int,
+    final_priority: str,
     fetch_note: str,
 ) -> None:
     for requirement in match_result.requirements:
@@ -800,9 +1059,9 @@ def _append_cv_match_rows(
             col("offer_requirement"): requirement.requirement,
             col("in_profile"): "Tak" if requirement.has_skill else "Nie",
             col("evidence_skill"): requirement.evidence,
-            col("match_strength"): f"{match_result.match_score}%",
+            col("match_strength"): f"{final_score}%",
             col("missing_to_learn"): requirement.missing_skill,
-            col("importance"): _priority_label(match_result.priority),
+            col("importance"): _priority_label(final_priority),
             col("comment"): comment,
         }
         _write_values(sheet, row, headers, values)
@@ -1031,6 +1290,26 @@ def _backfill_offer_tracking_columns(
             )
         elif legacy_score is not None:
             _set_cell_by_header(offers_sheet, row, headers, col("match_score"), legacy_score)
+
+        confidence_score = _clamp_match_score(
+            _parse_match_score(
+                _cell_by_header(offers_sheet, row, headers, col("confidence_score"))
+            )
+        )
+        if confidence_score is not None:
+            _set_cell_by_header(
+                offers_sheet, row, headers, col("confidence_score"), confidence_score
+            )
+
+        manual_score = _clamp_match_score(
+            _parse_match_score(
+                _cell_by_header(offers_sheet, row, headers, col("manual_match_score"))
+            )
+        )
+        if manual_score is not None:
+            _set_cell_by_header(
+                offers_sheet, row, headers, col("manual_match_score"), manual_score
+            )
 
         current_priority_code = _cell_by_header(
             offers_sheet, row, headers, col("priority_code")
@@ -1300,6 +1579,11 @@ def _refresh_dashboard_formulas(
     status_column = _column_letter_for_header(headers, col("status"))
     priority_column = _column_letter_for_header(headers, col("priority"))
     days_column = _column_letter_for_header(headers, col("days_since_check"))
+    salary_source_column = _column_letter_for_header(headers, col("salary_source"))
+    pln_min_monthly_column = _column_letter_for_header(headers, col("pln_min_monthly"))
+    pln_max_monthly_column = _column_letter_for_header(headers, col("pln_max_monthly"))
+    pln_min_hourly_column = _column_letter_for_header(headers, col("pln_min_hourly"))
+    pln_max_hourly_column = _column_letter_for_header(headers, col("pln_max_hourly"))
 
     if id_column:
         dashboard_sheet["B4"] = f"=COUNTA(Oferty!{id_column}2:{id_column}200)"
@@ -1321,6 +1605,36 @@ def _refresh_dashboard_formulas(
         )
     if days_column:
         dashboard_sheet["B9"] = f'=COUNTIF(Oferty!{days_column}2:{days_column}200,">14")'
+    if salary_source_column:
+        dashboard_sheet["B11"] = (
+            f'=COUNTIFS(Oferty!{salary_source_column}2:{salary_source_column}200,"<>",'
+            f'Oferty!{salary_source_column}2:{salary_source_column}200,"<>{UNKNOWN_VALUE}")'
+        )
+    if salary_source_column and pln_min_monthly_column:
+        dashboard_sheet["B12"] = _salary_average_formula(
+            pln_min_monthly_column, salary_source_column
+        )
+    if salary_source_column and pln_max_monthly_column:
+        dashboard_sheet["B13"] = _salary_average_formula(
+            pln_max_monthly_column, salary_source_column
+        )
+    if salary_source_column and pln_min_hourly_column:
+        dashboard_sheet["B14"] = _salary_average_formula(
+            pln_min_hourly_column, salary_source_column
+        )
+    if salary_source_column and pln_max_hourly_column:
+        dashboard_sheet["B15"] = _salary_average_formula(
+            pln_max_hourly_column, salary_source_column
+        )
+
+
+def _salary_average_formula(value_column: str, salary_source_column: str) -> str:
+    value_range = f"Oferty!{value_column}2:{value_column}200"
+    source_range = f"Oferty!{salary_source_column}2:{salary_source_column}200"
+    return (
+        f'=IFERROR(AVERAGEIFS({value_range},{source_range},"<>",'
+        f'{source_range},"<>{UNKNOWN_VALUE}"),"")'
+    )
 
 
 def _cell_by_header(
@@ -1381,7 +1695,7 @@ def _write_values(
 
     for header, value in values.items():
         column = _column_for_header(headers, header)
-        sheet.cell(row=row, column=column, value=value)
+        sheet.cell(row=row, column=column).value = value
 
 
 def _column_for_header(headers: dict[str, int], header: str) -> int | None:
@@ -1489,6 +1803,12 @@ def _parse_match_score(value: object) -> int | None:
         return None
 
     return int(round(float(match.group(0).replace(",", "."))))
+
+
+def _clamp_match_score(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, min(100, value))
 
 
 def _technology_text(value: object) -> str | None:
